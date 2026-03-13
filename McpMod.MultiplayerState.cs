@@ -445,7 +445,6 @@ public static partial class McpMod
                 {
                     ["id"] = potion.Id.Entry,
                     ["name"] = SafeGetText(() => potion.Title),
-                    ["description"] = SafeGetText(() => potion.DynamicDescription),
                     ["slot"] = slotIndex
                 });
             }
