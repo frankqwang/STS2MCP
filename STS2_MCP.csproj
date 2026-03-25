@@ -4,21 +4,21 @@
     <OutputType>Library</OutputType>
     <Nullable>enable</Nullable>
     <LangVersion>12.0</LangVersion>
-    <!-- Set your STS2 install path here, or pass as: dotnet build -p:STS2GameDir="..." -->
-    <STS2GameDir Condition="'$(STS2GameDir)' == ''">D:\SteamLibrary\steamapps\common\Slay the Spire 2</STS2GameDir>
+    <!-- Set your source-build assembly directory here, or pass as: dotnet build -p:STS2AssemblyDir="..." -->
+    <STS2AssemblyDir Condition="'$(STS2AssemblyDir)' == ''">C:\Users\Administrator\Desktop\Slay the Spire 2\.godot\mono\temp\bin\Debug</STS2AssemblyDir>
   </PropertyGroup>
 
   <ItemGroup>
     <Reference Include="sts2">
-      <HintPath>$(STS2GameDir)\data_sts2_windows_x86_64\sts2.dll</HintPath>
+      <HintPath>$(STS2AssemblyDir)\sts2.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="GodotSharp">
-      <HintPath>$(STS2GameDir)\data_sts2_windows_x86_64\GodotSharp.dll</HintPath>
+      <HintPath>$(STS2AssemblyDir)\GodotSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>$(STS2GameDir)\data_sts2_windows_x86_64\0Harmony.dll</HintPath>
+      <HintPath>$(STS2AssemblyDir)\0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

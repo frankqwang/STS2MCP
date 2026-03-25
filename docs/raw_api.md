@@ -2,11 +2,19 @@
 
 These API endpoints are available for direct HTTP requests *without* using the MCP server. For example, you can use `curl` or Postman to interact with the mod directly.
 
+The `v2/combat_env` endpoints are intended for the **Slay the Spire 2 source build** running in `--combat-trainer` mode. They do not fall back to the older UI-driven API.
+
 The mod exposes two endpoints:
 - `http://localhost:15526/api/v1/singleplayer` — for singleplayer runs
 - `http://localhost:15526/api/v1/multiplayer` — for multiplayer (co-op) runs
+- `http://localhost:15526/api/v2/combat_env/*` — for combat training on the source-built game
 
 The endpoints are mutually exclusive: calling the singleplayer endpoint during a multiplayer run (or vice versa) returns HTTP 409.
+
+`/api/v2/combat_env/*` is different:
+- it is only intended for the source-built training runtime
+- it requires launching the game with `--combat-trainer`
+- it does not fall back to `/api/v1/*`
 
 :::note
 These endpoints are designed for local use and do not have authentication or security measures, so they should not be exposed publicly - unless you know what you're doing!
@@ -316,3 +324,135 @@ Supports all the same actions as the singleplayer endpoint (play_card, use_potio
 - Only works if the turn hasn't actually ended yet (i.e., not all players committed)
 
 All other actions (`play_card`, `use_potion`, `choose_map_node`, `choose_event_option`, etc.) work identically to their singleplayer counterparts but are routed through multiplayer sync.
+
+---
+
+## `GET /api/v2/combat_env/state`
+
+Requires the source build to be running with `--combat-trainer`.
+
+Returns the combat trainer state directly from the in-game combat environment service.
+
+This endpoint:
+- only works when the source-built game is launched with `--combat-trainer`
+- returns combat state only, not map/event/shop UI state
+- is intended for training clients, not interactive gameplay automation
+
+The response includes:
+- episode metadata (`episode_number`, `seed`, `character_id`, `encounter_id`, `ascension_level`)
+- combat flags (`is_combat_active`, `is_episode_done`, `victory`, `current_side`, `is_play_phase`, `can_end_turn`)
+- hand-selection flags and payload (`is_hand_selection_active`, `hand_selection`)
+- player snapshot
+- enemy snapshots
+- hand cards with `valid_target_ids`
+- pile counts
+
+Example:
+```json
+{
+  "is_trainer_active": true,
+  "is_combat_active": true,
+  "episode_number": 1,
+  "character_id": "SILENT",
+  "encounter_id": "JAW_WORM",
+  "round_number": 1,
+  "current_side": "player",
+  "is_play_phase": true,
+  "can_end_turn": true
+}
+```
+
+## `POST /api/v2/combat_env/reset`
+
+Requires the source build to be running with `--combat-trainer`.
+
+Resets the combat environment to a fresh training episode and returns the new state.
+
+Request body:
+```json
+{
+  "character_id": "SILENT",
+  "encounter_id": "JAW_WORM",
+  "seed": "seed123",
+  "ascension_level": 0
+}
+```
+
+All fields are optional. Missing fields fall back to the trainer defaults configured in the game.
+
+## `POST /api/v2/combat_env/step`
+
+Requires the source build to be running with `--combat-trainer`.
+
+Executes one combat-environment action and returns:
+- `accepted`
+- `error`
+- `state`
+
+Supported action types in v1:
+
+### Play a card
+
+```json
+{
+  "type": "play_card",
+  "hand_index": 0,
+  "target_id": 3
+}
+```
+
+Notes:
+- `target_id` is only needed for targeted cards
+- `valid_target_ids` from `GET /state` should be treated as the source of truth
+
+### End turn
+
+```json
+{
+  "type": "end_turn"
+}
+```
+
+### Select a card during in-combat hand selection
+
+```json
+{
+  "type": "select_hand_card",
+  "hand_index": 1
+}
+```
+
+Notes:
+- Only valid when `is_hand_selection_active` is `true`
+- `hand_index` should come from `hand_selection.selectable_cards[*].hand_index`
+
+### Confirm the current in-combat hand selection
+
+```json
+{
+  "type": "confirm_selection"
+}
+```
+
+### Cancel the current in-combat hand selection
+
+```json
+{
+  "type": "cancel_selection"
+}
+```
+
+Notes:
+- Only valid when the prompt reports `hand_selection.cancelable = true`
+
+Example response:
+```json
+{
+  "accepted": true,
+  "error": null,
+  "state": {
+    "is_combat_active": true,
+    "current_side": "enemy"
+  }
+}
+```

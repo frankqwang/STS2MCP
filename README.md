@@ -1,28 +1,50 @@
 # Slay The Spire 2 - MCP Server
 
-A mod for [**Slay the Spire 2**](https://store.steampowered.com/app/2868840/Slay_the_Spire_2/) that lets AI agents play the game. Exposes game state and actions via a localhost REST API, with an optional MCP server for Claude Desktop / Claude Code integration.
+A mod for [**Slay the Spire 2**](https://store.steampowered.com/app/2868840/Slay_the_Spire_2/) source builds that exposes game state and actions over localhost HTTP, with an optional MCP bridge for tool-using agents.
 
-Singleplayer and multiplayer (co-op) supported. Tested against STS2 `v0.99.1`.
+Singleplayer and multiplayer support remain available through `/api/v1/*`. Training clients should prefer the new `/api/v2/combat_env/*` endpoints.
 
 > [!warning]
-> This mod allows external programs to read and control your game via a localhost API. Use at your own risk with runs you care less about.
-
-> [!caution]
-> Multiplayer support is in **beta** — expect bugs. Any multiplayer issues encountered with this mod installed are very likely caused by the mod, not the game. Please disable the mod and verify the issue persists before reporting bugs to the STS2 developers.
+> This mod allows external programs to read and control your game via a localhost API. Use it only with local processes you trust.
 
 ## For Players
 
-### Install
+### Install For The Source Build
 
-1. Copy `STS2_MCP.dll` and `STS2_MCP.json` to `<game_install>/mods/`
-2. Launch the game and enable mods in settings (a consent dialog appears on first launch)
-3. The mod starts an HTTP server on `localhost:15526` automatically
+This repository is aligned to the **Godot source-build runtime**, not the loose-DLL Steam install flow.
 
-### Connect to Claude
+1. Build and install the mod into the Godot runtime's `mods` directory:
+
+```powershell
+.\build.ps1 `
+  -SourceRepoDir "C:\Users\Administrator\Desktop\Slay the Spire 2" `
+  -GodotExe "C:\dev\game\Godot_v4.5.1-stable_mono_win64\Godot_v4.5.1-stable_mono_win64_console.exe" `
+  -Install
+```
+
+2. This creates:
+
+```text
+out/STS2_MCP/STS2_MCP.dll
+out/STS2_MCP/STS2_MCP.pck
+```
+
+3. And installs:
+
+```text
+<godot_exe_dir>\mods\STS2_MCP.dll
+<godot_exe_dir>\mods\STS2_MCP.pck
+```
+
+4. Make sure mod loading is enabled in the source-build settings save.
+5. Launch the game through Godot. For combat training, include `--combat-trainer`.
+6. The mod starts an HTTP server on `http://localhost:15526/`.
+
+### Connect To Claude
 
 Requires [Python 3.11+](https://www.python.org/) and [uv](https://docs.astral.sh/uv/).
 
-**Claude Code** — add to your project's `.mcp.json`:
+**Claude Code**: add to your project's `.mcp.json`:
 
 ```json
 {
@@ -35,45 +57,42 @@ Requires [Python 3.11+](https://www.python.org/) and [uv](https://docs.astral.sh
 }
 ```
 
-**Claude Desktop** — add to `claude_desktop_config.json` with the same config as above.
-
-The MCP server accepts `--host` and `--port` flags if you need non-default settings.
+**Claude Desktop**: use the same config in `claude_desktop_config.json`.
 
 Full tool reference: [mcp/README.md](./mcp/README.md) | Raw HTTP API: [docs/raw_api.md](./docs/raw_api.md)
 
 ## For Developers
 
-### Build & Install
+### Build
 
-Requires [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0).
-
-**PowerShell** (recommended):
+Requires [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) and a Godot Mono executable that can run the source build.
 
 ```powershell
-# Pass game path directly:
-.\build.ps1 -GameDir "D:\SteamLibrary\steamapps\common\Slay the Spire 2"
-
-# Or set it once and forget:
-$env:STS2_GAME_DIR = "D:\SteamLibrary\steamapps\common\Slay the Spire 2"
-.\build.ps1
+$env:STS2_SOURCE_REPO = "C:\Users\Administrator\Desktop\Slay the Spire 2"
+$env:STS2_GODOT_EXE = "C:\dev\game\Godot_v4.5.1-stable_mono_win64\Godot_v4.5.1-stable_mono_win64_console.exe"
+.\build.ps1 -Install
 ```
 
-The script builds `STS2_MCP.dll` into `out/STS2_MCP/`. Copy it along with the manifest JSON to `<game_install>/mods/` to install:
+The build script:
+- compiles `STS2_MCP.dll` against the source-build assembly output
+- packs `mod_manifest.json` into `STS2_MCP.pck`
+- optionally copies both files into `<godot_exe_dir>\mods\`
 
-```
-out/STS2_MCP/STS2_MCP.dll           ->  <game_install>/mods/STS2_MCP.dll
-mod_manifest.json                   ->  <game_install>/mods/STS2_MCP.json
-```
+### Training API
 
-### Features
+`/api/v2/combat_env/*` is the training-focused bridge:
+- `GET /api/v2/combat_env/state`
+- `POST /api/v2/combat_env/reset`
+- `POST /api/v2/combat_env/step`
 
-**Singleplayer** — full coverage of all game screens:
+These endpoints:
+- require the game to be launched with `--combat-trainer`
+- call the in-game `CombatTrainingEnvService` directly
+- do not fall back to the older UI-driven `/api/v1/*` semantics
 
-Combat (play cards, use potions, end turn, in-combat card selection), rewards (claim, pick/skip cards), map navigation (full DAG with lookahead), rest sites, shop, events & ancients, card selection overlays (transform, upgrade, remove), relic selection, treasure rooms, keyword glossary across all entities.
+### Legacy Coverage
 
-**Multiplayer (beta)** — all singleplayer features plus:
-
-End-turn voting (submit/undo), map node voting, shared event voting, treasure relic bidding, all-players state summary, per-player ready/vote tracking. Endpoints are mutually guarded (singleplayer endpoint rejects multiplayer runs and vice versa).
+The original `/api/v1/singleplayer` and `/api/v1/multiplayer` routes are still present for broader UI-driven automation.
 
 ## License
 

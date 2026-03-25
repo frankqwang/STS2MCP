@@ -10,6 +10,7 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Godot;
+using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 
@@ -165,6 +166,27 @@ public static partial class McpMod
                 else
                     SendError(response, 405, "Method not allowed");
             }
+            else if (path == "/api/v2/combat_env/state")
+            {
+                if (request.HttpMethod == "GET")
+                    HandleGetCombatEnvState(response);
+                else
+                    SendError(response, 405, "Method not allowed");
+            }
+            else if (path == "/api/v2/combat_env/reset")
+            {
+                if (request.HttpMethod == "POST")
+                    HandlePostCombatEnvReset(request, response);
+                else
+                    SendError(response, 405, "Method not allowed");
+            }
+            else if (path == "/api/v2/combat_env/step")
+            {
+                if (request.HttpMethod == "POST")
+                    HandlePostCombatEnvStep(request, response);
+                else
+                    SendError(response, 405, "Method not allowed");
+            }
             else
             {
                 SendError(response, 404, "Not found");
@@ -191,6 +213,18 @@ public static partial class McpMod
                 && MegaCrit.Sts2.Core.Runs.RunManager.Instance.NetService.Type.IsMultiplayer();
         }
         catch { return false; }
+    }
+
+    internal static bool IsCombatTrainerModeActive()
+    {
+        try
+        {
+            return CommandLineHelper.HasArg("combat-trainer");
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static void HandleGetMultiplayerState(HttpListenerRequest request, HttpListenerResponse response)
