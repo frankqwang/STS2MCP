@@ -153,6 +153,7 @@ public static partial class McpMod
         int pollDelayMs)
     {
         var previousSignature = GetFullRunStateSignature(previousState);
+        var previousStateType = GetStateType(previousState);
         var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(100, timeoutMs));
         var delay = Math.Max(10, pollDelayMs);
         Dictionary<string, object?>? lastChangedState = null;
@@ -179,8 +180,14 @@ public static partial class McpMod
                 if (IsFullRunTerminalState(state, ExtractFullRunOutcome(state)))
                     return state;
 
-                if (IsSettledFullRunState(state) && IsActionableOrTerminalFullRunState(state) && stablePolls >= 2)
-                    return state;
+                if (IsSettledFullRunState(state) && IsActionableOrTerminalFullRunState(state))
+                {
+                    if (ShouldReturnImmediatelyForChangedFullRunState(previousState, previousStateType, state))
+                        return state;
+
+                    if (stablePolls >= 2)
+                        return state;
+                }
             }
 
             Thread.Sleep(delay);
@@ -548,10 +555,40 @@ public static partial class McpMod
             : string.Empty;
     }
 
+    private static int GetFullRunAct(Dictionary<string, object?> state)
+    {
+        return TryGetDict(state, "run", out var runState) ? GetInt(runState, "act", 0) : 0;
+    }
+
+    private static int GetFullRunFloor(Dictionary<string, object?> state)
+    {
+        return TryGetDict(state, "run", out var runState) ? GetInt(runState, "floor", 0) : 0;
+    }
+
     private static bool IsSettledFullRunState(Dictionary<string, object?> state)
     {
         var stateType = GetStateType(state);
         return stateType is not "" and not "unknown" and not "menu";
+    }
+
+    private static bool ShouldReturnImmediatelyForChangedFullRunState(
+        Dictionary<string, object?> previousState,
+        string previousStateType,
+        Dictionary<string, object?> state)
+    {
+        var stateType = GetStateType(state);
+        if (!string.Equals(stateType, previousStateType, StringComparison.Ordinal))
+            return true;
+
+        if (GetFullRunAct(state) != GetFullRunAct(previousState) || GetFullRunFloor(state) != GetFullRunFloor(previousState))
+            return true;
+
+        return !RequiresStableFullRunPoll(previousStateType) && !RequiresStableFullRunPoll(stateType);
+    }
+
+    private static bool RequiresStableFullRunPoll(string stateType)
+    {
+        return stateType is "monster" or "elite" or "boss" or "hand_select";
     }
 
     private static bool IsActionableOrTerminalFullRunState(Dictionary<string, object?> state)
