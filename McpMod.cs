@@ -189,6 +189,12 @@ public static partial class McpMod
             }
             else if (path == "/api/v2/full_run_env/state")
             {
+                if (IsMultiplayerRun())
+                {
+                    SendError(response, 409,
+                        "Multiplayer run is active. Use /api/v1/multiplayer instead.");
+                    return;
+                }
                 if (request.HttpMethod == "GET")
                     HandleGetFullRunEnvState(response);
                 else
@@ -196,6 +202,12 @@ public static partial class McpMod
             }
             else if (path == "/api/v2/full_run_env/reset")
             {
+                if (IsMultiplayerRun())
+                {
+                    SendError(response, 409,
+                        "Multiplayer run is active. Use /api/v1/multiplayer instead.");
+                    return;
+                }
                 if (request.HttpMethod == "POST")
                     HandlePostFullRunEnvReset(request, response);
                 else
@@ -203,6 +215,12 @@ public static partial class McpMod
             }
             else if (path == "/api/v2/full_run_env/step")
             {
+                if (IsMultiplayerRun())
+                {
+                    SendError(response, 409,
+                        "Multiplayer run is active. Use /api/v1/multiplayer instead.");
+                    return;
+                }
                 if (request.HttpMethod == "POST")
                     HandlePostFullRunEnvStep(request, response);
                 else

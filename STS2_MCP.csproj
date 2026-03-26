@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <LangVersion>12.0</LangVersion>
     <!-- Set your source-build assembly directory here, or pass as: dotnet build -p:STS2AssemblyDir="..." -->
-    <STS2AssemblyDir Condition="'$(STS2AssemblyDir)' == ''">C:\Users\Administrator\Desktop\Slay the Spire 2\.godot\mono\temp\bin\Debug</STS2AssemblyDir>
+    <STS2AssemblyDir Condition="'$(STS2AssemblyDir)' == ''">D:\dev\ai-slay-sts2\sts2\.godot\mono\temp\bin\Debug</STS2AssemblyDir>
   </PropertyGroup>
 
   <ItemGroup>

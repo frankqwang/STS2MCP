@@ -36,7 +36,7 @@ public static partial class McpMod
                 throw new InvalidOperationException(resetError ?? "Failed to start run.");
 
             var state = WaitForFullRunEnvState(
-                predicate: static state => GetStateType(state) != "menu",
+                predicate: static state => GetStateType(state) != "menu" && IsSettledFullRunState(state) && IsActionableOrTerminalFullRunState(state),
                 timeoutMs: GetOptionalInt(parsed, "timeout_ms", 20000),
                 pollDelayMs: GetOptionalInt(parsed, "poll_delay_ms", 50));
             SendJson(response, state);
@@ -63,16 +63,21 @@ public static partial class McpMod
             if (!parsed.TryGetValue("action", out var actionElem) || actionElem.ValueKind != JsonValueKind.String)
                 throw new InvalidOperationException("Missing 'action' field.");
 
+            var beforeStateTask = RunOnMainThread(BuildFullRunEnvState);
+            var beforeState = beforeStateTask.GetAwaiter().GetResult();
+
             var action = actionElem.GetString() ?? string.Empty;
             var resultTask = RunOnMainThread(() => ExecuteAction(action, parsed));
             var actionResult = resultTask.GetAwaiter().GetResult();
 
-            var state = WaitForFullRunEnvState(
-                predicate: static _ => true,
-                timeoutMs: GetOptionalInt(parsed, "timeout_ms", 2000),
-                pollDelayMs: GetOptionalInt(parsed, "poll_delay_ms", 25));
+            var accepted = !IsErrorResult(actionResult, out var actionError);
+            var state = accepted
+                ? WaitForChangedFullRunEnvState(
+                    beforeState,
+                    timeoutMs: GetOptionalInt(parsed, "timeout_ms", 2000),
+                    pollDelayMs: GetOptionalInt(parsed, "poll_delay_ms", 25))
+                : RunOnMainThread(BuildFullRunEnvState).GetAwaiter().GetResult();
 
-            bool accepted = !IsErrorResult(actionResult, out var actionError);
             SendJson(response, ShapeFullRunEnvStepResult(state, accepted, actionError));
         }
         catch (JsonException ex)
@@ -125,6 +130,51 @@ public static partial class McpMod
         }
 
         throw new TimeoutException("Timed out waiting for full run env state transition.");
+    }
+
+    private static Dictionary<string, object?> WaitForChangedFullRunEnvState(
+        Dictionary<string, object?> previousState,
+        int timeoutMs,
+        int pollDelayMs)
+    {
+        var previousSignature = GetFullRunStateSignature(previousState);
+        var deadline = DateTime.UtcNow.AddMilliseconds(Math.Max(100, timeoutMs));
+        var delay = Math.Max(10, pollDelayMs);
+        Dictionary<string, object?>? lastChangedState = null;
+        string? lastChangedSignature = null;
+        int stablePolls = 0;
+
+        while (DateTime.UtcNow <= deadline)
+        {
+            var stateTask = RunOnMainThread(BuildFullRunEnvState);
+            var state = stateTask.GetAwaiter().GetResult();
+            var signature = GetFullRunStateSignature(state);
+            if (!string.Equals(signature, previousSignature, StringComparison.Ordinal))
+            {
+                lastChangedState = state;
+
+                if (string.Equals(signature, lastChangedSignature, StringComparison.Ordinal))
+                    stablePolls++;
+                else
+                {
+                    lastChangedSignature = signature;
+                    stablePolls = 1;
+                }
+
+                if (IsFullRunTerminalState(state, ExtractFullRunOutcome(state)))
+                    return state;
+
+                if (IsSettledFullRunState(state) && IsActionableOrTerminalFullRunState(state) && stablePolls >= 2)
+                    return state;
+            }
+
+            Thread.Sleep(delay);
+        }
+
+        if (lastChangedState != null)
+            return lastChangedState;
+
+        throw new TimeoutException("Timed out waiting for changed full run env state.");
     }
 
     private static Dictionary<string, object?> BuildFullRunEnvState()
@@ -200,7 +250,8 @@ public static partial class McpMod
                 break;
             case "relic_select":
                 AppendIndexedLegalActions(actions, state, "relic_select", "relics", "select_relic");
-                AppendIfTrue(actions, state, "relic_select", "can_skip", new Dictionary<string, object?> { ["action"] = "skip_relic_selection" });
+                if (TryGetDict(state, "relic_select", out var relicSelectState))
+                    AppendIfTrue(actions, relicSelectState, "can_skip", new Dictionary<string, object?> { ["action"] = "skip_relic_selection" });
                 break;
             case "treasure":
                 AppendIndexedLegalActions(actions, state, "treasure", "relics", "claim_treasure_relic");
@@ -298,7 +349,7 @@ public static partial class McpMod
 
         foreach (var option in EnumerateDictionaries(eventState.TryGetValue("options", out var rawOptions) ? rawOptions : null))
         {
-            if (GetBool(option, "is_locked") || GetBool(option, "is_chosen"))
+            if (GetBool(option, "is_locked") || GetBool(option, "was_chosen"))
                 continue;
 
             actions.Add(new Dictionary<string, object?>
@@ -316,7 +367,9 @@ public static partial class McpMod
 
         foreach (var item in EnumerateDictionaries(shopState.TryGetValue("items", out var rawItems) ? rawItems : null))
         {
-            if (!GetBool(item, "is_enabled", defaultValue: true))
+            if (!GetBool(item, "is_stocked", defaultValue: true))
+                continue;
+            if (!GetBool(item, "can_afford", defaultValue: true))
                 continue;
             actions.Add(new Dictionary<string, object?>
             {
@@ -338,7 +391,7 @@ public static partial class McpMod
             actions.Add(new Dictionary<string, object?>
             {
                 ["action"] = "select_card",
-                ["index"] = GetInt(card, "index", -1)
+                ["card_index"] = GetInt(card, "index", -1)
             });
         }
 
@@ -369,11 +422,20 @@ public static partial class McpMod
             {
                 foreach (var enemy in enemies)
                 {
+                    string? targetId = null;
+                    if (TryGetString(enemy, "entity_id", out var entityId))
+                        targetId = entityId;
+                    else if (TryGetString(enemy, "id", out var fallbackId))
+                        targetId = fallbackId;
+
+                    if (string.IsNullOrWhiteSpace(targetId))
+                        continue;
+
                     actions.Add(new Dictionary<string, object?>
                     {
                         ["action"] = "play_card",
-                        ["hand_index"] = handIndex,
-                        ["target_id"] = GetInt(enemy, "combat_id", -1)
+                        ["card_index"] = handIndex,
+                        ["target"] = targetId
                     });
                 }
             }
@@ -382,7 +444,7 @@ public static partial class McpMod
                 actions.Add(new Dictionary<string, object?>
                 {
                     ["action"] = "play_card",
-                    ["hand_index"] = handIndex
+                    ["card_index"] = handIndex
                 });
             }
         }
@@ -395,12 +457,12 @@ public static partial class McpMod
         if (!TryGetDict(state, "hand_select", out var handSelectState))
             return;
 
-        foreach (var card in EnumerateDictionaries(handSelectState.TryGetValue("selectable_cards", out var rawCards) ? rawCards : null))
+        foreach (var card in EnumerateDictionaries(handSelectState.TryGetValue("cards", out var rawCards) ? rawCards : null))
         {
             actions.Add(new Dictionary<string, object?>
             {
                 ["action"] = "combat_select_card",
-                ["index"] = GetInt(card, "index", -1)
+                ["card_index"] = GetInt(card, "index", -1)
             });
         }
 
@@ -467,6 +529,34 @@ public static partial class McpMod
         return state.TryGetValue("state_type", out var raw)
             ? (raw?.ToString() ?? string.Empty).Trim().ToLowerInvariant()
             : string.Empty;
+    }
+
+    private static bool IsSettledFullRunState(Dictionary<string, object?> state)
+    {
+        var stateType = GetStateType(state);
+        return stateType is not "" and not "unknown" and not "menu";
+    }
+
+    private static bool IsActionableOrTerminalFullRunState(Dictionary<string, object?> state)
+    {
+        if (IsFullRunTerminalState(state, ExtractFullRunOutcome(state)))
+            return true;
+
+        if (!state.TryGetValue("legal_actions", out var rawActions) || rawActions is not IEnumerable enumerable || rawActions is string)
+            return false;
+
+        foreach (var item in enumerable)
+        {
+            if (item is Dictionary<string, object?>)
+                return true;
+        }
+
+        return false;
+    }
+
+    private static string GetFullRunStateSignature(Dictionary<string, object?> state)
+    {
+        return JsonSerializer.Serialize(state, _jsonOptions);
     }
 
     private static bool IsFullRunTerminalState(Dictionary<string, object?> state, string? outcome)
