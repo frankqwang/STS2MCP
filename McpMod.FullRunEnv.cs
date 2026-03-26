@@ -71,14 +71,29 @@ public static partial class McpMod
             var actionResult = resultTask.GetAwaiter().GetResult();
 
             var accepted = !IsErrorResult(actionResult, out var actionError);
-            var state = accepted
-                ? WaitForChangedFullRunEnvState(
-                    beforeState,
-                    timeoutMs: GetOptionalInt(parsed, "timeout_ms", 2000),
-                    pollDelayMs: GetOptionalInt(parsed, "poll_delay_ms", 25))
-                : RunOnMainThread(BuildFullRunEnvState).GetAwaiter().GetResult();
+            Dictionary<string, object?> state;
+            string? stepInfoCode = null;
+            if (accepted)
+            {
+                try
+                {
+                    state = WaitForChangedFullRunEnvState(
+                        beforeState,
+                        timeoutMs: GetOptionalInt(parsed, "timeout_ms", 2000),
+                        pollDelayMs: GetOptionalInt(parsed, "poll_delay_ms", 25));
+                }
+                catch (TimeoutException)
+                {
+                    state = RunOnMainThread(BuildFullRunEnvState).GetAwaiter().GetResult();
+                    stepInfoCode = "state_change_timeout";
+                }
+            }
+            else
+            {
+                state = RunOnMainThread(BuildFullRunEnvState).GetAwaiter().GetResult();
+            }
 
-            SendJson(response, ShapeFullRunEnvStepResult(state, accepted, actionError));
+            SendJson(response, ShapeFullRunEnvStepResult(state, accepted, actionError, stepInfoCode));
         }
         catch (JsonException ex)
         {
@@ -190,7 +205,8 @@ public static partial class McpMod
     private static Dictionary<string, object?> ShapeFullRunEnvStepResult(
         Dictionary<string, object?> state,
         bool accepted,
-        string? error)
+        string? error,
+        string? stepInfoCode = null)
     {
         var outcome = ExtractFullRunOutcome(state);
         var done = IsFullRunTerminalState(state, outcome);
@@ -210,7 +226,8 @@ public static partial class McpMod
             ["info"] = new Dictionary<string, object?>
             {
                 ["state_type"] = GetStateType(state),
-                ["run_outcome"] = outcome
+                ["run_outcome"] = outcome,
+                ["step_info_code"] = stepInfoCode
             }
         };
     }
