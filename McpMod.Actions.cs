@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
@@ -28,7 +30,13 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.GameActions;
+using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Characters;
+using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.Screens.CharacterSelect;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Saves;
 
 namespace STS2_MCP;
 
@@ -37,7 +45,18 @@ public static partial class McpMod
     private static Dictionary<string, object?> ExecuteAction(string action, Dictionary<string, JsonElement> data)
     {
         if (!RunManager.Instance.IsInProgress)
-            return Error("No run in progress");
+        {
+            return action switch
+            {
+                "select_character" => ExecuteSelectCharacter(data),
+                "set_ascension" => ExecuteSetAscension(data),
+                "start_run" => ExecuteStartRun(data),
+                _ => Error("No run in progress")
+            };
+        }
+
+        if (action is "select_character" or "set_ascension" or "start_run")
+            return Error("Menu action unavailable while a run is in progress");
 
         var runState = RunManager.Instance.DebugOnlyGetState()!;
         var player = LocalContext.GetMe(runState);
@@ -66,8 +85,236 @@ public static partial class McpMod
             "select_relic" => ExecuteSelectRelic(data),
             "skip_relic_selection" => ExecuteSkipRelicSelection(),
             "claim_treasure_relic" => ExecuteClaimTreasureRelic(data),
+            "overlay_press" => ExecuteOverlayPress(data),
             _ => Error($"Unknown action: {action}")
         };
+    }
+
+    private static Dictionary<string, object?> ExecuteSelectCharacter(Dictionary<string, JsonElement> data)
+    {
+        var mainMenu = NGame.Instance?.MainMenu;
+        if (mainMenu == null || !mainMenu.IsVisibleInTree())
+            return Error("Main menu is not active");
+
+        if (!TryEnsureCharacterSelectOpen(mainMenu, out var charSelectScreen, out var error))
+            return Error(error);
+        var screen = charSelectScreen!;
+
+        var buttonContainer = screen.GetNodeOrNull<Godot.Node>("CharSelectButtons/ButtonContainer");
+        if (buttonContainer == null)
+            return Error("Character select button container not found");
+
+        var buttons = FindAll<NCharacterSelectButton>(buttonContainer);
+        if (buttons.Count == 0)
+            return Error("No character buttons available");
+
+        foreach (var button in buttons)
+            button.UnlockIfPossible();
+
+        NCharacterSelectButton? target = null;
+        if (data.TryGetValue("character_id", out var characterIdElem))
+        {
+            string? characterId = characterIdElem.GetString()?.Trim();
+            if (!string.IsNullOrWhiteSpace(characterId))
+            {
+                target = buttons.FirstOrDefault(b =>
+                    string.Equals(b.Character.Id.Entry, characterId, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(SafeGetText(() => b.Character.Title), characterId, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+        else if (data.TryGetValue("index", out var indexElem))
+        {
+            int index = indexElem.GetInt32();
+            if (index < 0 || index >= buttons.Count)
+                return Error($"Character index {index} out of range ({buttons.Count} buttons)");
+            target = buttons[index];
+        }
+        else
+        {
+            return Error("Missing 'character_id' or 'index'");
+        }
+
+        if (target == null)
+            return Error("Requested character not found");
+        if (target.IsLocked)
+            return Error($"Character '{target.Character.Id.Entry}' is locked");
+
+        target.Select();
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["message"] = $"Selected character: {target.Character.Id.Entry}",
+            ["character_id"] = target.Character.Id.Entry,
+            ["ascension"] = screen.Lobby.Ascension
+        };
+    }
+
+    private static Dictionary<string, object?> ExecuteSetAscension(Dictionary<string, JsonElement> data)
+    {
+        if (!data.TryGetValue("ascension", out var ascensionElem))
+            return Error("Missing 'ascension'");
+
+        int requestedAscension = ascensionElem.GetInt32();
+        if (requestedAscension < 0)
+            return Error("Ascension must be >= 0");
+
+        var mainMenu = NGame.Instance?.MainMenu;
+        if (mainMenu == null || !mainMenu.IsVisibleInTree())
+            return Error("Main menu is not active");
+
+        if (!TryEnsureCharacterSelectOpen(mainMenu, out var charSelectScreen, out var error))
+            return Error(error);
+        var screen = charSelectScreen!;
+
+        var ascensionPanel = screen.GetNodeOrNull<NAscensionPanel>("%AscensionPanel");
+        if (ascensionPanel == null)
+            return Error("Ascension panel not found");
+
+        int maxAscension = Math.Max(0, screen.Lobby.MaxAscension);
+        int appliedAscension = Math.Clamp(requestedAscension, 0, maxAscension);
+        ascensionPanel.SetAscensionLevel(appliedAscension);
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["message"] = $"Ascension set to {appliedAscension}",
+            ["requested_ascension"] = requestedAscension,
+            ["ascension"] = appliedAscension,
+            ["max_ascension"] = maxAscension
+        };
+    }
+
+    private static Dictionary<string, object?> ExecuteStartRun(Dictionary<string, JsonElement> data)
+    {
+        if (RunManager.Instance.IsInProgress)
+            return Error("Run already in progress");
+
+        var game = NGame.Instance;
+        var mainMenu = game?.MainMenu;
+        if (game == null || mainMenu == null || !mainMenu.IsVisibleInTree())
+            return Error("Main menu is not active");
+
+        var unlockState = SaveManager.Instance.GenerateUnlockStateFromProgress();
+        var charSelectScreen = TryGetCharacterSelectScreen(mainMenu);
+
+        CharacterModel? character = null;
+        if (data.TryGetValue("character_id", out var characterIdElem))
+        {
+            string? requestedId = characterIdElem.GetString();
+            if (string.IsNullOrWhiteSpace(requestedId))
+                return Error("'character_id' is empty");
+            character = ResolveCharacter(requestedId);
+            if (character == null)
+                return Error($"Unknown character_id '{requestedId}'");
+        }
+        else if (charSelectScreen?.Visible == true)
+        {
+            character = charSelectScreen.Lobby.LocalPlayer.character;
+        }
+
+        character ??= ModelDb.Character<Ironclad>();
+
+        if (!unlockState.Characters.Contains(character))
+            return Error($"Character '{character.Id.Entry}' is locked");
+
+        int requestedAscension = charSelectScreen?.Visible == true ? charSelectScreen.Lobby.Ascension : 0;
+        if (data.TryGetValue("ascension", out var ascensionElem))
+            requestedAscension = ascensionElem.GetInt32();
+
+        if (requestedAscension < 0)
+            return Error("Ascension must be >= 0");
+
+        int maxAscension = Math.Max(0, SaveManager.Instance.Progress.GetOrCreateCharacterStats(character.Id).MaxAscension);
+        int ascension = Math.Clamp(requestedAscension, 0, maxAscension);
+
+        string seed;
+        if (data.TryGetValue("seed", out var seedElem))
+        {
+            string? requestedSeed = seedElem.GetString();
+            if (string.IsNullOrWhiteSpace(requestedSeed))
+                return Error("'seed' is empty");
+            seed = SeedHelper.CanonicalizeSeed(requestedSeed);
+        }
+        else
+        {
+            seed = game.DebugSeedOverride ?? SeedHelper.GetRandomSeed();
+        }
+
+        var acts = ActModel.GetRandomList(seed, unlockState, isMultiplayer: false).ToList();
+        TaskHelper.RunSafely(game.StartNewSingleplayerRun(character, shouldSave: true, acts, new List<ModifierModel>(), seed, ascension));
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["message"] = $"Starting run as {character.Id.Entry} at ascension {ascension}",
+            ["character_id"] = character.Id.Entry,
+            ["ascension"] = ascension,
+            ["seed"] = seed
+        };
+    }
+
+    private static bool TryEnsureCharacterSelectOpen(
+        MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NMainMenu mainMenu,
+        out NCharacterSelectScreen? charSelectScreen,
+        out string error)
+    {
+        charSelectScreen = TryGetCharacterSelectScreen(mainMenu);
+        if (charSelectScreen?.Visible == true)
+        {
+            error = string.Empty;
+            return true;
+        }
+
+        var singleplayerButton = mainMenu.GetNodeOrNull<NButton>("MainMenuTextButtons/SingleplayerButton");
+        if (singleplayerButton is { Visible: true, IsEnabled: true })
+            singleplayerButton.ForceClick();
+
+        charSelectScreen = TryGetCharacterSelectScreen(mainMenu);
+        if (charSelectScreen?.Visible == true)
+        {
+            error = string.Empty;
+            return true;
+        }
+
+        var standardButton = mainMenu.GetNodeOrNull<NButton>("Submenus/SingleplayerSubmenu/StandardButton");
+        if (standardButton is { Visible: true, IsEnabled: true })
+            standardButton.ForceClick();
+
+        charSelectScreen = TryGetCharacterSelectScreen(mainMenu);
+        if (charSelectScreen?.Visible == true)
+        {
+            error = string.Empty;
+            return true;
+        }
+
+        error = "Unable to open character select screen from the main menu";
+        return false;
+    }
+
+    private static NCharacterSelectScreen? TryGetCharacterSelectScreen(MegaCrit.Sts2.Core.Nodes.Screens.MainMenu.NMainMenu mainMenu)
+    {
+        return mainMenu.GetNodeOrNull<NCharacterSelectScreen>("Submenus/CharacterSelectScreen");
+    }
+
+    private static CharacterModel? ResolveCharacter(string characterIdOrName)
+    {
+        string value = characterIdOrName.Trim();
+        if (value.Length == 0)
+            return null;
+
+        var match = ModelDb.AllCharacters.FirstOrDefault(c =>
+            string.Equals(c.Id.Entry, value, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(SafeGetText(() => c.Title), value, StringComparison.OrdinalIgnoreCase));
+        if (match != null)
+            return match;
+
+        var randomCharacter = ModelDb.Character<RandomCharacter>();
+        if (string.Equals(randomCharacter.Id.Entry, value, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(SafeGetText(() => randomCharacter.Title), value, StringComparison.OrdinalIgnoreCase))
+            return randomCharacter;
+
+        return null;
     }
 
     private static Dictionary<string, object?> ExecutePlayCard(Player player, Dictionary<string, JsonElement> data)
@@ -284,7 +531,8 @@ public static partial class McpMod
 
         int index = indexElem.GetInt32();
 
-        var restRoom = NRestSiteRoom.Instance;
+        var restRoom = NRestSiteRoom.Instance
+            ?? FindFirst<NRestSiteRoom>(((Godot.SceneTree)Godot.Engine.GetMainLoop()).Root);
         if (restRoom == null)
             return Error("Rest site room is not open");
 
@@ -480,9 +728,24 @@ public static partial class McpMod
         {
             if (merchRoom.Inventory.IsOpen)
             {
+                var closeMethod = merchRoom.Inventory.GetType().GetMethod("Close", BindingFlags.Instance | BindingFlags.NonPublic);
+                if (closeMethod != null)
+                {
+                    closeMethod.Invoke(merchRoom.Inventory, null);
+                    if (merchRoom.ProceedButton.IsEnabled)
+                    {
+                        merchRoom.ProceedButton.ForceClick();
+                        return new Dictionary<string, object?> { ["status"] = "ok", ["message"] = "Closed inventory and proceeded from shop" };
+                    }
+                    return new Dictionary<string, object?> { ["status"] = "ok", ["message"] = "Closing shop inventory" };
+                }
+
                 var backBtn = FindFirst<NBackButton>(merchRoom);
                 if (backBtn is { IsEnabled: true })
+                {
                     backBtn.ForceClick();
+                    return new Dictionary<string, object?> { ["status"] = "ok", ["message"] = "Closing shop inventory" };
+                }
             }
             if (merchRoom.ProceedButton.IsEnabled)
             {
@@ -503,6 +766,37 @@ public static partial class McpMod
         return Error("No proceed button available or enabled");
     }
 
+    private static Dictionary<string, object?> ExecuteOverlayPress(Dictionary<string, JsonElement> data)
+    {
+        var overlay = NOverlayStack.Instance?.Peek();
+        if (overlay == null)
+            return Error("No overlay is open");
+
+        if (!data.TryGetValue("index", out var indexElem))
+            return Error("Missing 'index' (overlay button index)");
+
+        int index = indexElem.GetInt32();
+
+        var buttons = FindAll<NClickableControl>((Godot.Node)overlay)
+            .Where(b => b.Visible && b.IsVisibleInTree())
+            .ToList();
+
+        if (index < 0 || index >= buttons.Count)
+            return Error($"Overlay button index {index} out of range ({buttons.Count} visible buttons)");
+
+        var button = buttons[index];
+        if (!button.IsEnabled)
+            return Error($"Overlay button {index} is disabled");
+
+        button.ForceClick();
+
+        return new Dictionary<string, object?>
+        {
+            ["status"] = "ok",
+            ["message"] = $"Pressing overlay button: {button.Name}"
+        };
+    }
+
     private static Dictionary<string, object?> ExecuteSelectCard(Dictionary<string, JsonElement> data)
     {
         var overlay = NOverlayStack.Instance?.Peek();
@@ -518,13 +812,22 @@ public static partial class McpMod
             if (grid == null)
                 return Error("Card grid not found in selection screen");
 
-            var holders = FindAllSortedByPosition<NGridCardHolder>(gridScreen);
+            var holders = FindAllSortedByPosition<NGridCardHolder>(grid);
             if (index < 0 || index >= holders.Count)
                 return Error($"Card index {index} out of range ({holders.Count} cards available)");
 
             var holder = holders[index];
             string cardName = SafeGetText(() => holder.CardModel?.Title) ?? "unknown";
+            if (holder.CardModel != null && TryInvokeCardGridSelection(gridScreen, holder.CardModel))
+            {
+                return new Dictionary<string, object?>
+                {
+                    ["status"] = "ok",
+                    ["message"] = $"Selecting card: {cardName}"
+                };
+            }
             grid.EmitSignal(NCardGrid.SignalName.HolderPressed, holder);
+            holder.EmitSignal(NCardHolder.SignalName.Pressed, holder);
 
             return new Dictionary<string, object?>
             {
@@ -540,6 +843,9 @@ public static partial class McpMod
 
             var holder = holders[index];
             string cardName = SafeGetText(() => holder.CardModel?.Title) ?? "unknown";
+            var grid = FindFirst<NCardGrid>(chooseScreen);
+            if (grid != null)
+                grid.EmitSignal(NCardGrid.SignalName.HolderPressed, holder);
             holder.EmitSignal(NCardHolder.SignalName.Pressed, holder);
 
             return new Dictionary<string, object?>
@@ -550,6 +856,21 @@ public static partial class McpMod
         }
 
         return Error("No card selection screen is open");
+    }
+
+    private static bool TryInvokeCardGridSelection(NCardGridSelectionScreen screen, CardModel card)
+    {
+        var method = screen.GetType().GetMethod(
+            "OnCardClicked",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            types: new[] { typeof(CardModel) },
+            modifiers: null);
+        if (method == null)
+            return false;
+
+        method.Invoke(screen, new object[] { card });
+        return true;
     }
 
     private static Dictionary<string, object?> ExecuteConfirmSelection()

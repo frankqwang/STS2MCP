@@ -187,6 +187,27 @@ public static partial class McpMod
                 else
                     SendError(response, 405, "Method not allowed");
             }
+            else if (path == "/api/v2/full_run_env/state")
+            {
+                if (request.HttpMethod == "GET")
+                    HandleGetFullRunEnvState(response);
+                else
+                    SendError(response, 405, "Method not allowed");
+            }
+            else if (path == "/api/v2/full_run_env/reset")
+            {
+                if (request.HttpMethod == "POST")
+                    HandlePostFullRunEnvReset(request, response);
+                else
+                    SendError(response, 405, "Method not allowed");
+            }
+            else if (path == "/api/v2/full_run_env/step")
+            {
+                if (request.HttpMethod == "POST")
+                    HandlePostFullRunEnvStep(request, response);
+                else
+                    SendError(response, 405, "Method not allowed");
+            }
             else
             {
                 SendError(response, 404, "Not found");

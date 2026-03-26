@@ -1,5 +1,9 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.Text.RegularExpressions;
+using Godot;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
@@ -7,6 +11,7 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Potions;
+using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
@@ -24,13 +29,19 @@ using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
 using MegaCrit.Sts2.Core.Nodes.Screens;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
+using MegaCrit.Sts2.Core.Nodes.Screens.GameOverScreen;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Nodes.Relics;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Nodes.Screens.TreasureRoomRelic;
+using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.Screens.CharacterSelect;
+using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Saves;
+using MegaCrit.Sts2.Core.Models.Characters;
 
 namespace STS2_MCP;
 
@@ -44,6 +55,7 @@ public static partial class McpMod
         {
             result["state_type"] = "menu";
             result["message"] = "No run in progress. Player is in the main menu.";
+            result["menu"] = BuildMenuState();
             return result;
         }
 
@@ -72,17 +84,18 @@ public static partial class McpMod
             result["state_type"] = "relic_select";
             result["relic_select"] = BuildRelicSelectState(relicSelectScreen, runState);
         }
+        else if (topOverlay is NGameOverScreen gameOverScreen)
+        {
+            result["state_type"] = "game_over";
+            result["game_over"] = BuildGameOverState(gameOverScreen, runState);
+        }
         else if (topOverlay is IOverlayScreen
                  && topOverlay is not NRewardsScreen
                  && topOverlay is not NCardRewardSelectionScreen)
         {
             // Catch-all for unhandled overlays — prevents soft-locks
             result["state_type"] = "overlay";
-            result["overlay"] = new Dictionary<string, object?>
-            {
-                ["screen_type"] = topOverlay.GetType().Name,
-                ["message"] = $"An overlay ({topOverlay.GetType().Name}) is active. It may require manual interaction in-game."
-            };
+            result["overlay"] = BuildOverlayState((Node)topOverlay, runState);
         }
         else if (currentRoom is CombatRoom combatRoom)
         {
@@ -116,7 +129,7 @@ public static partial class McpMod
                     if (overlay is NCardRewardSelectionScreen cardScreen)
                     {
                         result["state_type"] = "card_reward";
-                        result["card_reward"] = BuildCardRewardState(cardScreen);
+                        result["card_reward"] = BuildCardRewardState(cardScreen, runState);
                     }
                     else if (overlay is NRewardsScreen rewardsScreen)
                     {
@@ -158,12 +171,6 @@ public static partial class McpMod
             }
             else
             {
-                // Auto-open the shopkeeper's inventory if not already open
-                var merchUI = NMerchantRoom.Instance;
-                if (merchUI != null && !merchUI.Inventory.IsOpen)
-                {
-                    merchUI.OpenInventory();
-                }
                 result["state_type"] = "shop";
                 result["shop"] = BuildShopState(merchantRoom, runState);
             }
@@ -474,21 +481,91 @@ public static partial class McpMod
         return state;
     }
 
+    private static Dictionary<string, object?> BuildNonCombatPlayerState(Player player)
+    {
+        int totalSlots = player.PotionSlots.Count;
+        int openSlots = player.PotionSlots.Count(s => s == null);
+
+        var state = new Dictionary<string, object?>
+        {
+            ["character"] = SafeGetText(() => player.Character.Title),
+            ["hp"] = player.Creature.CurrentHp,
+            ["max_hp"] = player.Creature.MaxHp,
+            ["gold"] = player.Gold,
+            ["potion_slots"] = totalSlots,
+            ["open_potion_slots"] = openSlots
+        };
+
+        var deck = new List<Dictionary<string, object?>>();
+        foreach (var card in player.Deck.Cards)
+        {
+            string costDisplay = card.EnergyCost.CostsX ? "X" : card.EnergyCost.GetAmountToSpend().ToString();
+            string? starCostDisplay = null;
+            if (card.HasStarCostX)
+                starCostDisplay = "X";
+            else if (card.CurrentStarCost >= 0)
+                starCostDisplay = card.GetStarCostWithModifiers().ToString();
+
+            deck.Add(new Dictionary<string, object?>
+            {
+                ["id"] = card.Id.Entry,
+                ["name"] = SafeGetText(() => card.Title),
+                ["type"] = card.Type.ToString(),
+                ["cost"] = costDisplay,
+                ["star_cost"] = starCostDisplay,
+                ["description"] = SafeGetCardDescription(card, PileType.Deck),
+                ["rarity"] = card.Rarity.ToString(),
+                ["is_upgraded"] = card.IsUpgraded,
+                ["keywords"] = BuildHoverTips(card.HoverTips)
+            });
+        }
+        state["deck"] = deck;
+
+        var relics = new List<Dictionary<string, object?>>();
+        foreach (var relic in player.Relics)
+        {
+            relics.Add(new Dictionary<string, object?>
+            {
+                ["id"] = relic.Id.Entry,
+                ["name"] = SafeGetText(() => relic.Title),
+                ["description"] = SafeGetText(() => relic.DynamicDescription),
+                ["counter"] = relic.ShowCounter ? relic.DisplayAmount : null,
+                ["keywords"] = BuildHoverTips(relic.HoverTipsExcludingRelic)
+            });
+        }
+        state["relics"] = relics;
+
+        var potions = new List<Dictionary<string, object?>>();
+        int slotIndex = 0;
+        foreach (var potion in player.PotionSlots)
+        {
+            if (potion != null)
+            {
+                potions.Add(new Dictionary<string, object?>
+                {
+                    ["id"] = potion.Id.Entry,
+                    ["name"] = SafeGetText(() => potion.Title),
+                    ["description"] = SafeGetText(() => potion.DynamicDescription),
+                    ["slot"] = slotIndex,
+                    ["can_use_in_combat"] = potion.Usage == PotionUsage.CombatOnly || potion.Usage == PotionUsage.AnyTime,
+                    ["target_type"] = potion.TargetType.ToString(),
+                    ["keywords"] = BuildHoverTips(potion.ExtraHoverTips)
+                });
+            }
+            slotIndex++;
+        }
+        state["potions"] = potions;
+
+        return state;
+    }
+
     private static Dictionary<string, object?> BuildEventState(EventRoom eventRoom, RunState runState)
     {
         var state = new Dictionary<string, object?>();
 
         var player = LocalContext.GetMe(runState);
         if (player != null)
-        {
-            state["player"] = new Dictionary<string, object?>
-            {
-                ["character"] = SafeGetText(() => player.Character.Title),
-                ["hp"] = player.Creature.CurrentHp,
-                ["max_hp"] = player.Creature.MaxHp,
-                ["gold"] = player.Gold
-            };
-        }
+            state["player"] = BuildNonCombatPlayerState(player);
 
         var eventModel = eventRoom.CanonicalEvent;
         bool isAncient = eventModel is AncientEventModel;
@@ -525,12 +602,16 @@ public static partial class McpMod
                 var optData = new Dictionary<string, object?>
                 {
                     ["index"] = index,
+                    ["text_key"] = opt.TextKey,
                     ["title"] = SafeGetText(() => opt.Title),
                     ["description"] = SafeGetText(() => opt.Description),
                     ["is_locked"] = opt.IsLocked,
                     ["is_proceed"] = opt.IsProceed,
                     ["was_chosen"] = opt.WasChosen
                 };
+                var effectInfo = InferEventOptionEffects(opt);
+                foreach (var kv in effectInfo)
+                    optData[kv.Key] = kv.Value;
                 if (opt.Relic != null)
                 {
                     optData["relic_name"] = SafeGetText(() => opt.Relic.Title);
@@ -546,21 +627,470 @@ public static partial class McpMod
         return state;
     }
 
+    private static Dictionary<string, object?> BuildMenuState()
+    {
+        var availableActions = new List<string>();
+        var state = new Dictionary<string, object?>
+        {
+            ["is_main_menu_visible"] = false,
+            ["has_run_save"] = false,
+            ["can_open_singleplayer"] = false,
+            ["singleplayer_submenu_visible"] = false,
+            ["character_select_visible"] = false,
+            ["selected_character"] = null,
+            ["ascension"] = 0,
+            ["max_ascension"] = 0,
+            ["can_start"] = false,
+            ["available_actions"] = availableActions
+        };
+
+        try
+        {
+            state["has_run_save"] = SaveManager.Instance.HasRunSave;
+        }
+        catch
+        {
+            state["has_run_save"] = false;
+        }
+
+        var mainMenu = NGame.Instance?.MainMenu;
+        if (mainMenu == null)
+        {
+            state["available_characters"] = BuildMenuCharactersFromProgress();
+            return state;
+        }
+
+        state["is_main_menu_visible"] = mainMenu.IsVisibleInTree();
+
+        var singleplayerButton = mainMenu.GetNodeOrNull<NButton>("MainMenuTextButtons/SingleplayerButton");
+        state["can_open_singleplayer"] = singleplayerButton is { Visible: true, IsEnabled: true };
+        if ((bool)state["can_open_singleplayer"]!)
+            availableActions.Add("select_character");
+
+        var singleplayerSubmenu = mainMenu.GetNodeOrNull<Control>("Submenus/SingleplayerSubmenu");
+        state["singleplayer_submenu_visible"] = singleplayerSubmenu?.Visible ?? false;
+
+        var charSelectScreen = mainMenu.GetNodeOrNull<NCharacterSelectScreen>("Submenus/CharacterSelectScreen");
+        bool isCharSelectVisible = charSelectScreen?.Visible == true && charSelectScreen.IsVisibleInTree();
+        state["character_select_visible"] = isCharSelectVisible;
+
+        if (isCharSelectVisible && charSelectScreen != null)
+        {
+            state["available_characters"] = BuildMenuCharactersFromCharacterSelect(charSelectScreen);
+            try
+            {
+                state["selected_character"] = charSelectScreen.Lobby.LocalPlayer.character.Id.Entry;
+                state["ascension"] = charSelectScreen.Lobby.Ascension;
+                state["max_ascension"] = charSelectScreen.Lobby.MaxAscension;
+            }
+            catch
+            {
+                state["selected_character"] = null;
+                state["ascension"] = 0;
+                state["max_ascension"] = 0;
+            }
+
+            var confirmButton = charSelectScreen.GetNodeOrNull<NConfirmButton>("ConfirmButton");
+            state["can_start"] = confirmButton is { Visible: true, IsEnabled: true };
+            availableActions.Add("select_character");
+            availableActions.Add("set_ascension");
+            if ((bool)state["can_start"]!)
+                availableActions.Add("start_run");
+        }
+        else
+        {
+            state["available_characters"] = BuildMenuCharactersFromProgress();
+        }
+
+        return state;
+    }
+
+    private static List<Dictionary<string, object?>> BuildMenuCharactersFromCharacterSelect(NCharacterSelectScreen screen)
+    {
+        var buttonContainer = screen.GetNodeOrNull<Node>("CharSelectButtons/ButtonContainer");
+        var buttons = buttonContainer != null ? FindAll<NCharacterSelectButton>(buttonContainer) : new List<NCharacterSelectButton>();
+
+        string? selectedId = null;
+        try
+        {
+            selectedId = screen.Lobby.LocalPlayer.character.Id.Entry;
+        }
+        catch
+        {
+            selectedId = null;
+        }
+
+        var characters = new List<Dictionary<string, object?>>();
+        int index = 0;
+        foreach (var button in buttons)
+        {
+            characters.Add(new Dictionary<string, object?>
+            {
+                ["index"] = index,
+                ["id"] = button.Character.Id.Entry,
+                ["name"] = SafeGetText(() => button.Character.Title),
+                ["is_locked"] = button.IsLocked,
+                ["is_selected"] = selectedId != null && selectedId == button.Character.Id.Entry,
+                ["is_random"] = button.IsRandom
+            });
+            index++;
+        }
+
+        return characters;
+    }
+
+    private static List<Dictionary<string, object?>> BuildMenuCharactersFromProgress()
+    {
+        var characters = new List<Dictionary<string, object?>>();
+
+        HashSet<MegaCrit.Sts2.Core.Models.CharacterModel>? unlocked = null;
+        try
+        {
+            unlocked = SaveManager.Instance.GenerateUnlockStateFromProgress().Characters.ToHashSet();
+        }
+        catch
+        {
+            unlocked = null;
+        }
+
+        int index = 0;
+        foreach (var character in ModelDb.AllCharacters)
+        {
+            bool isLocked = unlocked != null && !unlocked.Contains(character);
+            characters.Add(new Dictionary<string, object?>
+            {
+                ["index"] = index,
+                ["id"] = character.Id.Entry,
+                ["name"] = SafeGetText(() => character.Title),
+                ["is_locked"] = isLocked,
+                ["is_selected"] = false,
+                ["is_random"] = false
+            });
+            index++;
+        }
+
+        bool allUnlocked = unlocked != null && ModelDb.AllCharacters.All(unlocked.Contains);
+        if (allUnlocked)
+        {
+            var random = ModelDb.Character<RandomCharacter>();
+            characters.Add(new Dictionary<string, object?>
+            {
+                ["index"] = index,
+                ["id"] = random.Id.Entry,
+                ["name"] = SafeGetText(() => random.Title),
+                ["is_locked"] = false,
+                ["is_selected"] = false,
+                ["is_random"] = true
+            });
+        }
+
+        return characters;
+    }
+
+    private static Dictionary<string, object?> BuildGameOverState(NGameOverScreen screen, RunState runState)
+    {
+        var state = BuildOverlayState(screen, runState);
+        state["kind"] = "game_over";
+        state["terminal"] = true;
+        state["outcome"] = runState.CurrentRoom?.IsVictoryRoom == true ? "victory" : "death";
+        return state;
+    }
+
+    private static Dictionary<string, object?> BuildOverlayState(Node overlay, RunState runState)
+    {
+        var state = new Dictionary<string, object?>
+        {
+            ["screen_type"] = overlay.GetType().Name,
+            ["kind"] = "generic_overlay",
+            ["terminal"] = false,
+            ["message"] = $"An overlay ({overlay.GetType().Name}) is active. It may require manual interaction in-game."
+        };
+
+        var buttons = new List<Dictionary<string, object?>>();
+        var availableActions = new List<Dictionary<string, object?>>();
+        bool canConfirm = false;
+        bool canCancel = false;
+        int index = 0;
+
+        foreach (var button in FindAll<NClickableControl>(overlay).Where(b => b.Visible && b.IsVisibleInTree()))
+        {
+            string text = GetOverlayButtonText(button) ?? button.Name;
+            bool isConfirm = IsConfirmLike(text, button.Name);
+            bool isCancel = IsCancelLike(text, button.Name);
+
+            buttons.Add(new Dictionary<string, object?>
+            {
+                ["index"] = index,
+                ["name"] = button.Name,
+                ["text"] = text,
+                ["is_enabled"] = button.IsEnabled,
+                ["is_visible"] = button.Visible,
+                ["is_confirm"] = isConfirm,
+                ["is_cancel"] = isCancel
+            });
+
+            if (button.IsEnabled)
+            {
+                availableActions.Add(new Dictionary<string, object?>
+                {
+                    ["action"] = "overlay_press",
+                    ["index"] = index,
+                    ["name"] = button.Name,
+                    ["text"] = text,
+                    ["is_confirm"] = isConfirm,
+                    ["is_cancel"] = isCancel
+                });
+            }
+
+            if (isConfirm && button.IsEnabled)
+                canConfirm = true;
+            if (isCancel && button.IsEnabled)
+                canCancel = true;
+
+            index++;
+        }
+
+        state["buttons"] = buttons;
+        state["available_actions"] = availableActions;
+        state["primary_text"] = ExtractOverlayPrimaryText(overlay);
+        state["can_confirm"] = canConfirm;
+        state["can_cancel"] = canCancel;
+        if (overlay is NGameOverScreen)
+        {
+            state["kind"] = "game_over";
+            state["terminal"] = true;
+            state["outcome"] = runState.CurrentRoom?.IsVictoryRoom == true ? "victory" : "death";
+        }
+        return state;
+    }
+
+    private static string? ExtractOverlayPrimaryText(Node overlay)
+    {
+        string? best = null;
+        foreach (var node in EnumerateNodeTree(overlay))
+        {
+            if (node is NClickableControl)
+                continue;
+
+            string? text = TryGetNodeText(node);
+            if (string.IsNullOrWhiteSpace(text) || text.Length < 3)
+                continue;
+
+            if (best == null || text.Length > best.Length)
+                best = text;
+        }
+        return best;
+    }
+
+    private static string? GetOverlayButtonText(NClickableControl button)
+    {
+        string? direct = TryGetNodeText(button);
+        if (!string.IsNullOrWhiteSpace(direct))
+            return direct;
+
+        foreach (var node in EnumerateNodeTree(button))
+        {
+            if (node == button)
+                continue;
+            string? text = TryGetNodeText(node);
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
+        }
+        return null;
+    }
+
+    private static IEnumerable<Node> EnumerateNodeTree(Node root)
+    {
+        yield return root;
+        foreach (var child in root.GetChildren())
+        {
+            if (child is not Node node)
+                continue;
+
+            foreach (var descendant in EnumerateNodeTree(node))
+                yield return descendant;
+        }
+    }
+
+    private static string? TryGetNodeText(Node node)
+    {
+        foreach (string key in new[] { "text", "title", "label", "Text", "Title" })
+        {
+            try
+            {
+                var value = node.Get(key);
+                if (value.VariantType == Variant.Type.Nil)
+                    continue;
+
+                string normalized = NormalizeText(value.AsString());
+                if (!string.IsNullOrWhiteSpace(normalized))
+                    return normalized;
+            }
+            catch
+            {
+                // no-op
+            }
+        }
+
+        return null;
+    }
+
+    private static string NormalizeText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return string.Empty;
+
+        string stripped = StripRichTextTags(text).Replace("\n", " ").Replace("\r", " ");
+        return Regex.Replace(stripped, "\\s+", " ").Trim();
+    }
+
+    private static bool IsConfirmLike(string? text, string? name)
+    {
+        string value = (text + " " + name).ToLowerInvariant();
+        return value.Contains("confirm")
+               || value.Contains("yes")
+               || value.Contains("ok")
+               || value.Contains("accept")
+               || value.Contains("proceed")
+               || value.Contains("continue")
+               || value.Contains("start")
+               || value.Contains("embark")
+               || value.Contains("ready")
+               || value.Contains("确认")
+               || value.Contains("继续")
+               || value.Contains("开始")
+               || value.Contains("前进")
+               || value.Contains("出发");
+    }
+
+    private static bool IsCancelLike(string? text, string? name)
+    {
+        string value = (text + " " + name).ToLowerInvariant();
+        return value.Contains("cancel")
+               || value.Contains("back")
+               || value.Contains("close")
+               || value.Contains("exit")
+               || value.Contains("no")
+               || value.Contains("abort")
+               || value.Contains("dismiss")
+               || value.Contains("skip")
+               || value.Contains("取消")
+               || value.Contains("返回")
+               || value.Contains("关闭")
+               || value.Contains("否")
+               || value.Contains("跳过");
+    }
+
+    private static Dictionary<string, object?> InferEventOptionEffects(EventOption option)
+    {
+        var effectTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var cardOps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        string combined = string.Join(" ",
+            new[]
+            {
+                option.TextKey,
+                SafeGetText(() => option.Title),
+                SafeGetText(() => option.Description)
+            }.Where(s => !string.IsNullOrWhiteSpace(s)));
+        string normalized = NormalizeText(combined).ToLowerInvariant();
+
+        int? hpDelta = InferHpDelta(normalized);
+        int? goldDelta = InferGoldDelta(normalized);
+        if (hpDelta.HasValue)
+            effectTags.Add(hpDelta.Value < 0 ? "lose_hp" : "gain_hp");
+        if (goldDelta.HasValue)
+            effectTags.Add(goldDelta.Value < 0 ? "lose_gold" : "gain_gold");
+
+        bool addsCurse = normalized.Contains("curse") || normalized.Contains("诅咒");
+        if (addsCurse)
+            effectTags.Add("add_curse");
+
+        bool startsCombat = normalized.Contains("combat")
+                            || normalized.Contains("battle")
+                            || normalized.Contains("fight")
+                            || normalized.Contains("enemy")
+                            || normalized.Contains("战斗")
+                            || normalized.Contains("遭遇");
+        if (startsCombat)
+            effectTags.Add("start_combat");
+        if (option.IsProceed)
+            effectTags.Add("proceed");
+
+        if (normalized.Contains("remove") || normalized.Contains("purge") || normalized.Contains("移除"))
+        {
+            cardOps.Add("remove");
+            effectTags.Add("card_remove");
+        }
+        if (normalized.Contains("upgrade") || normalized.Contains("smith") || normalized.Contains("升级") || normalized.Contains("强化"))
+        {
+            cardOps.Add("upgrade");
+            effectTags.Add("card_upgrade");
+        }
+        if (normalized.Contains("transform") || normalized.Contains("变形") || normalized.Contains("转换"))
+        {
+            cardOps.Add("transform");
+            effectTags.Add("card_transform");
+        }
+        if ((normalized.Contains("gain") || normalized.Contains("obtain") || normalized.Contains("receive") || normalized.Contains("获得") || normalized.Contains("得到"))
+            && (normalized.Contains("card") || normalized.Contains("卡")))
+        {
+            cardOps.Add("add");
+            effectTags.Add("card_add");
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["effect_tags"] = effectTags.OrderBy(t => t).ToList(),
+            ["hp_delta"] = hpDelta,
+            ["gold_delta"] = goldDelta,
+            ["card_ops"] = cardOps.OrderBy(t => t).ToList(),
+            ["adds_curse"] = addsCurse,
+            ["starts_combat"] = startsCombat
+        };
+    }
+
+    private static int? InferHpDelta(string normalized)
+    {
+        var match = Regex.Match(normalized, "(gain|heal|recover|回复|恢复|获得)\\s*(\\d+)\\s*(hp|health|生命|体力)");
+        if (match.Success)
+            return int.Parse(match.Groups[2].Value);
+
+        match = Regex.Match(normalized, "(lose|pay|take|suffer|失去|损失|受到)\\s*(\\d+)\\s*(hp|health|生命|体力|damage|伤害)");
+        if (match.Success)
+            return -int.Parse(match.Groups[2].Value);
+
+        match = Regex.Match(normalized, "([+-]\\d+)\\s*(hp|health|生命|体力)");
+        if (match.Success && int.TryParse(match.Groups[1].Value, out int signed))
+            return signed;
+
+        return null;
+    }
+
+    private static int? InferGoldDelta(string normalized)
+    {
+        var match = Regex.Match(normalized, "(gain|obtain|receive|获得|得到)\\s*(\\d+)\\s*(gold|金币)");
+        if (match.Success)
+            return int.Parse(match.Groups[2].Value);
+
+        match = Regex.Match(normalized, "(lose|pay|spend|失去|花费)\\s*(\\d+)\\s*(gold|金币)");
+        if (match.Success)
+            return -int.Parse(match.Groups[2].Value);
+
+        match = Regex.Match(normalized, "([+-]\\d+)\\s*(gold|金币)");
+        if (match.Success && int.TryParse(match.Groups[1].Value, out int signed))
+            return signed;
+
+        return null;
+    }
+
     private static Dictionary<string, object?> BuildRestSiteState(RestSiteRoom restSiteRoom, RunState runState)
     {
         var state = new Dictionary<string, object?>();
 
         var player = LocalContext.GetMe(runState);
         if (player != null)
-        {
-            state["player"] = new Dictionary<string, object?>
-            {
-                ["character"] = SafeGetText(() => player.Character.Title),
-                ["hp"] = player.Creature.CurrentHp,
-                ["max_hp"] = player.Creature.MaxHp,
-                ["gold"] = player.Gold
-            };
-        }
+            state["player"] = BuildNonCombatPlayerState(player);
 
         var options = new List<Dictionary<string, object?>>();
         int index = 0;
@@ -590,17 +1120,7 @@ public static partial class McpMod
 
         var player = LocalContext.GetMe(runState);
         if (player != null)
-        {
-            state["player"] = new Dictionary<string, object?>
-            {
-                ["character"] = SafeGetText(() => player.Character.Title),
-                ["hp"] = player.Creature.CurrentHp,
-                ["max_hp"] = player.Creature.MaxHp,
-                ["gold"] = player.Gold,
-                ["potion_slots"] = player.PotionSlots.Count,
-                ["open_potion_slots"] = player.PotionSlots.Count(s => s == null)
-            };
-        }
+            state["player"] = BuildNonCombatPlayerState(player);
 
         var inventory = merchantRoom.Inventory;
         var items = new List<Dictionary<string, object?>>();
@@ -703,19 +1223,7 @@ public static partial class McpMod
         // Player summary
         var player = LocalContext.GetMe(runState);
         if (player != null)
-        {
-            int totalSlots = player.PotionSlots.Count;
-            int openSlots = player.PotionSlots.Count(s => s == null);
-            state["player"] = new Dictionary<string, object?>
-            {
-                ["character"] = SafeGetText(() => player.Character.Title),
-                ["hp"] = player.Creature.CurrentHp,
-                ["max_hp"] = player.Creature.MaxHp,
-                ["gold"] = player.Gold,
-                ["potion_slots"] = totalSlots,
-                ["open_potion_slots"] = openSlots
-            };
-        }
+            state["player"] = BuildNonCombatPlayerState(player);
 
         var map = runState.Map;
         var visitedCoords = runState.VisitedMapCoords;
@@ -829,19 +1337,7 @@ public static partial class McpMod
         // Player summary for decision-making context
         var player = LocalContext.GetMe(runState);
         if (player != null)
-        {
-            int totalSlots = player.PotionSlots.Count;
-            int openSlots = player.PotionSlots.Count(s => s == null);
-            state["player"] = new Dictionary<string, object?>
-            {
-                ["character"] = SafeGetText(() => player.Character.Title),
-                ["hp"] = player.Creature.CurrentHp,
-                ["max_hp"] = player.Creature.MaxHp,
-                ["gold"] = player.Gold,
-                ["potion_slots"] = totalSlots,
-                ["open_potion_slots"] = openSlots
-            };
-        }
+            state["player"] = BuildNonCombatPlayerState(player);
 
         // Reward items
         var rewardButtons = FindAll<NRewardButton>(rewardsScreen);
@@ -880,9 +1376,13 @@ public static partial class McpMod
         return state;
     }
 
-    private static Dictionary<string, object?> BuildCardRewardState(NCardRewardSelectionScreen cardScreen)
+    private static Dictionary<string, object?> BuildCardRewardState(NCardRewardSelectionScreen cardScreen, RunState runState)
     {
         var state = new Dictionary<string, object?>();
+
+        var player = LocalContext.GetMe(runState);
+        if (player != null)
+            state["player"] = BuildNonCombatPlayerState(player);
 
         var cardHolders = FindAllSortedByPosition<NCardHolder>(cardScreen);
         var cards = new List<Dictionary<string, object?>>();
@@ -928,6 +1428,8 @@ public static partial class McpMod
     private static Dictionary<string, object?> BuildCardSelectState(NCardGridSelectionScreen screen, RunState runState)
     {
         var state = new Dictionary<string, object?>();
+        var selectedCards = GetSelectedCards(screen);
+        TryGetCardSelectorPrefs(screen, out var prefs);
 
         // Screen type
         state["screen_type"] = screen switch
@@ -942,15 +1444,7 @@ public static partial class McpMod
         // Player summary
         var player = LocalContext.GetMe(runState);
         if (player != null)
-        {
-            state["player"] = new Dictionary<string, object?>
-            {
-                ["character"] = SafeGetText(() => player.Character.Title),
-                ["hp"] = player.Creature.CurrentHp,
-                ["max_hp"] = player.Creature.MaxHp,
-                ["gold"] = player.Gold
-            };
-        }
+            state["player"] = BuildNonCombatPlayerState(player);
 
         // Prompt text from UI label
         var bottomLabel = screen.GetNodeOrNull("%BottomLabel");
@@ -985,6 +1479,12 @@ public static partial class McpMod
             index++;
         }
         state["cards"] = cards;
+        state["selected_cards"] = BuildCompactCardList(selectedCards);
+        state["selected_count"] = selectedCards.Count;
+        state["min_select"] = prefs.MinSelect;
+        state["max_select"] = prefs.MaxSelect;
+        state["remaining_picks"] = Math.Max(0, prefs.MaxSelect - selectedCards.Count);
+        state["requires_manual_confirmation"] = prefs.RequireManualConfirmation;
 
         // Preview container showing? (selection complete, awaiting confirm)
         // Upgrade screens use UpgradeSinglePreviewContainer / UpgradeMultiPreviewContainer
@@ -1035,15 +1535,7 @@ public static partial class McpMod
 
         var player = LocalContext.GetMe(runState);
         if (player != null)
-        {
-            state["player"] = new Dictionary<string, object?>
-            {
-                ["character"] = SafeGetText(() => player.Character.Title),
-                ["hp"] = player.Creature.CurrentHp,
-                ["max_hp"] = player.Creature.MaxHp,
-                ["gold"] = player.Gold
-            };
-        }
+            state["player"] = BuildNonCombatPlayerState(player);
 
         state["prompt"] = "Choose a card.";
 
@@ -1083,6 +1575,8 @@ public static partial class McpMod
     private static Dictionary<string, object?> BuildHandSelectState(NPlayerHand hand, RunState runState)
     {
         var state = new Dictionary<string, object?>();
+        var selectedCards = GetSelectedCards(hand);
+        TryGetCardSelectorPrefs(hand, out var prefs);
 
         // Mode
         state["mode"] = hand.CurrentMode switch
@@ -1126,27 +1620,12 @@ public static partial class McpMod
         }
         state["cards"] = selectableCards;
 
-        // Already-selected cards (in the SelectedHandCardContainer)
-        var selectedContainer = hand.GetNodeOrNull<Godot.Control>("%SelectedHandCardContainer");
-        if (selectedContainer != null)
-        {
-            var selectedCards = new List<Dictionary<string, object?>>();
-            var selectedHolders = FindAll<NSelectedHandCardHolder>(selectedContainer);
-            int selIdx = 0;
-            foreach (var holder in selectedHolders)
-            {
-                var card = holder.CardModel;
-                if (card == null) continue;
-                selectedCards.Add(new Dictionary<string, object?>
-                {
-                    ["index"] = selIdx,
-                    ["name"] = SafeGetText(() => card.Title)
-                });
-                selIdx++;
-            }
-            if (selectedCards.Count > 0)
-                state["selected_cards"] = selectedCards;
-        }
+        state["selected_cards"] = BuildCompactCardList(selectedCards);
+        state["selected_count"] = selectedCards.Count;
+        state["min_select"] = prefs.MinSelect;
+        state["max_select"] = prefs.MaxSelect;
+        state["remaining_picks"] = Math.Max(0, prefs.MaxSelect - selectedCards.Count);
+        state["requires_manual_confirmation"] = prefs.RequireManualConfirmation;
 
         // Confirm button state
         var confirmBtn = hand.GetNodeOrNull<NConfirmButton>("%SelectModeConfirmButton");
@@ -1155,21 +1634,70 @@ public static partial class McpMod
         return state;
     }
 
+    private static bool TryGetPrivateField(object? target, string fieldName, out object? value)
+    {
+        value = null;
+        if (target == null)
+            return false;
+
+        for (Type? type = target.GetType(); type != null; type = type.BaseType)
+        {
+            var field = type.GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (field == null)
+                continue;
+
+            value = field.GetValue(target);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetCardSelectorPrefs(object? target, out CardSelectorPrefs prefs)
+    {
+        prefs = default;
+        if (!TryGetPrivateField(target, "_prefs", out var raw) || raw is not CardSelectorPrefs typed)
+            return false;
+
+        prefs = typed;
+        return true;
+    }
+
+    private static List<CardModel> GetSelectedCards(object? target)
+    {
+        if (TryGetPrivateField(target, "_selectedCards", out var raw) && raw is IEnumerable<CardModel> cards)
+            return cards.ToList();
+
+        return new List<CardModel>();
+    }
+
+    private static List<Dictionary<string, object?>> BuildCompactCardList(IEnumerable<CardModel> cards)
+    {
+        var list = new List<Dictionary<string, object?>>();
+        int index = 0;
+        foreach (var card in cards)
+        {
+            list.Add(new Dictionary<string, object?>
+            {
+                ["index"] = index,
+                ["id"] = card.Id.Entry,
+                ["name"] = SafeGetText(() => card.Title),
+                ["type"] = card.Type.ToString(),
+                ["cost"] = card.EnergyCost.CostsX ? "X" : card.EnergyCost.GetAmountToSpend().ToString(),
+                ["is_upgraded"] = card.IsUpgraded
+            });
+            index++;
+        }
+        return list;
+    }
+
     private static Dictionary<string, object?> BuildRelicSelectState(NChooseARelicSelection screen, RunState runState)
     {
         var state = new Dictionary<string, object?>();
 
         var player = LocalContext.GetMe(runState);
         if (player != null)
-        {
-            state["player"] = new Dictionary<string, object?>
-            {
-                ["character"] = SafeGetText(() => player.Character.Title),
-                ["hp"] = player.Creature.CurrentHp,
-                ["max_hp"] = player.Creature.MaxHp,
-                ["gold"] = player.Gold
-            };
-        }
+            state["player"] = BuildNonCombatPlayerState(player);
 
         state["prompt"] = "Choose a relic.";
 
@@ -1205,15 +1733,7 @@ public static partial class McpMod
 
         var player = LocalContext.GetMe(runState);
         if (player != null)
-        {
-            state["player"] = new Dictionary<string, object?>
-            {
-                ["character"] = SafeGetText(() => player.Character.Title),
-                ["hp"] = player.Creature.CurrentHp,
-                ["max_hp"] = player.Creature.MaxHp,
-                ["gold"] = player.Gold
-            };
-        }
+            state["player"] = BuildNonCombatPlayerState(player);
 
         var treasureUI = FindFirst<NTreasureRoom>(
             ((Godot.SceneTree)Godot.Engine.GetMainLoop()).Root);

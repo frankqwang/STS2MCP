@@ -123,7 +123,7 @@ public static partial class McpMod
                     if (overlay is NCardRewardSelectionScreen cardScreen)
                     {
                         result["state_type"] = "card_reward";
-                        result["card_reward"] = BuildCardRewardState(cardScreen);
+                        result["card_reward"] = BuildCardRewardState(cardScreen, runState);
                     }
                     else if (overlay is NRewardsScreen rewardsScreen)
                     {

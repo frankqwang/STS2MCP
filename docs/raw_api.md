@@ -5,9 +5,9 @@ These API endpoints are available for direct HTTP requests *without* using the M
 The `v2/combat_env` endpoints are intended for the **Slay the Spire 2 source build** running in `--combat-trainer` mode. They do not fall back to the older UI-driven API.
 
 The mod exposes two endpoints:
-- `http://localhost:15526/api/v1/singleplayer` — for singleplayer runs
-- `http://localhost:15526/api/v1/multiplayer` — for multiplayer (co-op) runs
-- `http://localhost:15526/api/v2/combat_env/*` — for combat training on the source-built game
+- `http://localhost:15526/api/v1/singleplayer` 闂?for singleplayer runs
+- `http://localhost:15526/api/v1/multiplayer` 闂?for multiplayer (co-op) runs
+- `http://localhost:15526/api/v2/combat_env/*` 闂?for combat training on the source-built game
 
 The endpoints are mutually exclusive: calling the singleplayer endpoint during a multiplayer run (or vice versa) returns HTTP 409.
 
@@ -28,19 +28,20 @@ Query parameters:
 | `format`  | `json`, `markdown` | `json` | Response format |
 
 Returns the current game state. The `state_type` field indicates the screen:
-- `monster` / `elite` / `boss` — In combat (full battle state returned)
-- `hand_select` — In-combat card selection prompt (exhaust, discard, etc.) with battle state
-- `combat_rewards` — Post-combat rewards screen (reward items, proceed button)
-- `card_reward` — Card reward selection screen (card choices, skip option)
-- `map` — Map navigation screen (full DAG, next options with lookahead, visited path)
-- `rest_site` — Rest site (available options: rest, smith, etc.)
-- `shop` — Shop (full inventory: cards, relics, potions, card removal with costs)
-- `event` — Event or Ancient (options with descriptions, ancient dialogue detection)
-- `card_select` — Deck card selection (transform, upgrade, remove, discard) or choose-a-card (potions, effects)
-- `relic_select` — Relic choice screen (boss relics, immediate pick + skip)
-- `treasure` — Treasure room (chest auto-opens, relic claiming)
-- `overlay` — Catch-all for unhandled overlay screens (prevents soft-locks)
-- `menu` — No run in progress
+- `monster` / `elite` / `boss` 闂?In combat (full battle state returned)
+- `hand_select` 闂?In-combat card selection prompt (exhaust, discard, etc.) with battle state
+- `combat_rewards` 闂?Post-combat rewards screen (reward items, proceed button)
+- `card_reward` 闂?Card reward selection screen (card choices, skip option)
+- `map` 闂?Map navigation screen (full DAG, next options with lookahead, visited path)
+- `rest_site` 闂?Rest site (available options: rest, smith, etc.)
+- `shop` 闂?Shop (full inventory: cards, relics, potions, card removal with costs)
+- `event` 闂?Event or Ancient (options with descriptions, ancient dialogue detection)
+- `card_select` 闂?Deck card selection (transform, upgrade, remove, discard) or choose-a-card (potions, effects)
+- `relic_select` 闂?Relic choice screen (boss relics, immediate pick + skip)
+- `treasure` 闂?Treasure room (chest auto-opens, relic claiming)
+- `game_over` - Terminal game-over/victory overlay with structured buttons and outcome
+- `overlay` - Catch-all for unhandled overlay screens with structured buttons/actions
+- `menu` - No run in progress
 
 ### State details
 
@@ -53,8 +54,9 @@ Returns the current game state. The `state_type` field indicates the screen:
 - Mode: `simple_select` (exhaust/discard) or `upgrade_select` (in-combat upgrade)
 - Prompt text (e.g., "Select a card to Exhaust.")
 - Selectable cards: index, id, name, type, cost, description, upgrade status, keywords
-- Already-selected cards (if multi-select): index, name
-- Confirm button state
+- Already-selected cards: index, id, name, type, cost, upgrade status
+- Selection counts: `selected_count`, `min_select`, `max_select`, `remaining_picks`
+- Confirmability: `can_confirm`, `requires_manual_confirmation`
 - Full battle state is also included for combat context
 
 **Rewards state includes:**
@@ -89,7 +91,10 @@ Returns the current game state. The `state_type` field indicates the screen:
 - Player summary: character, HP, gold
 - Prompt text (e.g., "Choose 2 cards to Transform.")
 - Cards: index, id, name, type, cost, description, rarity, upgrade status, keywords
+- Selected cards: index, id, name, type, cost, upgrade status
+- Selection counts: `selected_count`, `min_select`, `max_select`, `remaining_picks`
 - Preview state, confirm/cancel button availability
+- Confirmability: `can_confirm`, `requires_manual_confirmation`
 - For `choose` type (e.g., Colorless Potion): immediate pick on select, skip availability
 
 **Relic select state includes:**
@@ -107,6 +112,27 @@ Returns the current game state. The `state_type` field indicates the screen:
 - Relics: index, id, name, description, rarity, keywords
 - Proceed button state
 - Chest is auto-opened when state is queried
+
+**Game over / overlay state includes:**
+- `screen_type`: exact overlay class name
+- `kind`: normalized overlay kind such as `game_over` or `generic_overlay`
+- `terminal`: whether the overlay ends the run
+- `outcome`: `death` or `victory` when the overlay is a game-over screen
+- `buttons`: all visible overlay buttons with index, text, enabled/visible state, and confirm/cancel hints
+- `available_actions`: enabled overlay button presses that clients can enumerate directly
+- `primary_text`: best-effort main text extracted from the overlay
+
+**Menu state includes:**
+- `is_main_menu_visible`: whether the main menu is visible
+- `has_run_save`: whether a save exists that can be resumed
+- `can_open_singleplayer`: whether the singleplayer button is currently enabled
+- `singleplayer_submenu_visible`: whether the singleplayer submenu is open
+- `character_select_visible`: whether character select is open
+- `selected_character`: the selected character id when character select is visible
+- `ascension` / `max_ascension`: current and maximum ascension values
+- `can_start`: whether a run can be started from the current menu state
+- `available_actions`: menu actions the client can call directly, currently `select_character`, `set_ascension`, and `start_run`
+- `available_characters`: unlocked characters and their menu metadata
 
 ## `POST /api/v1/singleplayer`
 
@@ -176,283 +202,13 @@ Returns the current game state. The `state_type` field indicates the screen:
 ```
 - Proceeds from the current screen to the map
 - Works from: rewards screen, rest site, shop (auto-closes inventory), treasure room
-- Does NOT work for events — use `choose_event_option` with the Proceed option's index
+- Does NOT work for events - use `choose_event_option` with the Proceed option's index
+- Does NOT automatically handle game-over overlays
 
-**Choose a rest site option:**
+**Press an overlay button:**
 ```json
-{ "action": "choose_rest_option", "index": 0 }
+{ "action": "overlay_press", "index": 0 }
 ```
-- `index`: 0-based index of the enabled option (from GET response)
-- Options include Rest (heal), Smith (upgrade a card), and relic-granted options
-
-**Purchase a shop item:**
-```json
-{ "action": "shop_purchase", "index": 0 }
-```
-- `index`: 0-based index of the item in the shop inventory (from GET response)
-- Item must be stocked and affordable
-- Shop inventory is auto-opened if not already open
-
-**Choose an event option:**
-```json
-{ "action": "choose_event_option", "index": 0 }
-```
-- `index`: 0-based index of the unlocked option (from GET response)
-- Works for both regular events and ancients (after dialogue)
-
-**Advance ancient dialogue:**
-```json
-{ "action": "advance_dialogue" }
-```
-- Clicks through dialogue text in ancient events
-- Call repeatedly until `in_dialogue` becomes `false` and options appear
-
-**Choose a map node:**
-```json
-{ "action": "choose_map_node", "index": 0 }
-```
-- `index`: 0-based index from the `next_options` array in the map state
-- Node types: Monster, Elite, Boss, RestSite, Shop, Treasure, Unknown, Ancient
-
-**Select a card in the selection screen:**
-```json
-{ "action": "select_card", "index": 0 }
-```
-- `index`: 0-based index of the card in the grid (from GET response)
-- For grid screens (transform, upgrade, select): toggles selection. When enough cards are selected, a preview may appear automatically
-- For choose-a-card screens (potions, effects): picks immediately
-
-**Confirm card selection:**
-```json
-{ "action": "confirm_selection" }
-```
-- Confirms the current selection (from preview or main confirm button)
-- Works with upgrade previews (single and multi), transform previews, and generic confirm buttons
-- Not needed for choose-a-card screens where picking is immediate
-
-**Cancel card selection:**
-```json
-{ "action": "cancel_selection" }
-```
-- If a preview is showing (upgrade/transform), goes back to the selection grid
-- For choose-a-card screens, clicks the skip button (if available)
-- Otherwise, closes the card selection screen (only if cancellation is allowed)
-
-**Select a relic:**
-```json
-{ "action": "select_relic", "index": 0 }
-```
-- `index`: 0-based index of the relic (from GET response)
-- Used for boss relic selection. Pick is immediate.
-
-**Skip relic selection:**
-```json
-{ "action": "skip_relic_selection" }
-```
-
-**Claim a treasure relic:**
-```json
-{ "action": "claim_treasure_relic", "index": 0 }
-```
-- `index`: 0-based index of the relic (from GET response)
-- Chest is auto-opened when state is queried; this claims a revealed relic
-
-### Error responses
-
-All errors return:
-```json
-{
-  "status": "error",
-  "error": "Description of what went wrong"
-}
-```
-
----
-
-## `GET /api/v1/multiplayer`
-
-Query parameters:
-| Parameter | Values | Default | Description |
-|-----------|--------|---------|-------------|
-| `format`  | `json`, `markdown` | `json` | Response format |
-
-Returns the multiplayer game state. Shares the same `state_type` values as singleplayer, with these additions:
-
-**Additional top-level fields:**
-- `game_mode`: always `"multiplayer"`
-- `net_type`: network service type (e.g., `"SteamMultiplayer"`)
-- `player_count`: number of players in the run
-- `local_player_slot`: index of the local player in the players array
-- `players`: summary of all players (character, HP, gold, alive status, local flag)
-
-**Battle state additions:**
-- `all_players_ready`: whether all players have submitted end turn
-- `players[]`: full state for the local player, summary (HP, block, energy, status, relics, potions) for others
-- Each player entry includes `is_local`, `is_alive`, and `is_ready_to_end_turn`
-
-**Map state additions:**
-- `votes[]`: per-player map node votes (`player`, `is_local`, `voted`, `vote_col`, `vote_row`)
-- `all_voted`: whether all players have voted
-
-**Event state additions:**
-- `is_shared`: whether the event is a shared vote
-- `votes[]` (shared events only): per-player option votes
-- `all_voted`: whether all players have voted
-
-**Treasure state additions:**
-- `is_bidding_phase`: whether relics are revealed and bidding is active
-- `bids[]`: per-player relic bids (`player`, `is_local`, `voted`, `vote_relic_index`)
-- `all_bid`: whether all players have bid
-- Chest is auto-opened when state is queried (same as singleplayer)
-
-## `POST /api/v1/multiplayer`
-
-Supports all the same actions as the singleplayer endpoint (play_card, use_potion, choose_map_node, etc.), plus these multiplayer-specific actions:
-
-**End turn (vote):**
-```json
-{ "action": "end_turn" }
-```
-- In multiplayer, this is a vote — the turn only ends when ALL players submit
-- Returns an error if already submitted (use `undo_end_turn` to retract first)
-
-**Undo end turn:**
-```json
-{ "action": "undo_end_turn" }
-```
-- Retracts the end-turn vote so the player can continue playing cards
-- Only works if the turn hasn't actually ended yet (i.e., not all players committed)
-
-All other actions (`play_card`, `use_potion`, `choose_map_node`, `choose_event_option`, etc.) work identically to their singleplayer counterparts but are routed through multiplayer sync.
-
----
-
-## `GET /api/v2/combat_env/state`
-
-Requires the source build to be running with `--combat-trainer`.
-
-Returns the combat trainer state directly from the in-game combat environment service.
-
-This endpoint:
-- only works when the source-built game is launched with `--combat-trainer`
-- returns combat state only, not map/event/shop UI state
-- is intended for training clients, not interactive gameplay automation
-
-The response includes:
-- episode metadata (`episode_number`, `seed`, `character_id`, `encounter_id`, `ascension_level`)
-- combat flags (`is_combat_active`, `is_episode_done`, `victory`, `current_side`, `is_play_phase`, `can_end_turn`)
-- hand-selection flags and payload (`is_hand_selection_active`, `hand_selection`)
-- player snapshot
-- enemy snapshots
-- hand cards with `valid_target_ids`
-- pile counts
-
-Example:
-```json
-{
-  "is_trainer_active": true,
-  "is_combat_active": true,
-  "episode_number": 1,
-  "character_id": "SILENT",
-  "encounter_id": "JAW_WORM",
-  "round_number": 1,
-  "current_side": "player",
-  "is_play_phase": true,
-  "can_end_turn": true
-}
-```
-
-## `POST /api/v2/combat_env/reset`
-
-Requires the source build to be running with `--combat-trainer`.
-
-Resets the combat environment to a fresh training episode and returns the new state.
-
-Request body:
-```json
-{
-  "character_id": "SILENT",
-  "encounter_id": "JAW_WORM",
-  "seed": "seed123",
-  "ascension_level": 0
-}
-```
-
-All fields are optional. Missing fields fall back to the trainer defaults configured in the game.
-
-## `POST /api/v2/combat_env/step`
-
-Requires the source build to be running with `--combat-trainer`.
-
-Executes one combat-environment action and returns:
-- `accepted`
-- `error`
-- `state`
-
-Supported action types in v1:
-
-### Play a card
-
-```json
-{
-  "type": "play_card",
-  "hand_index": 0,
-  "target_id": 3
-}
-```
-
-Notes:
-- `target_id` is only needed for targeted cards
-- `valid_target_ids` from `GET /state` should be treated as the source of truth
-
-### End turn
-
-```json
-{
-  "type": "end_turn"
-}
-```
-
-### Select a card during in-combat hand selection
-
-```json
-{
-  "type": "select_hand_card",
-  "hand_index": 1
-}
-```
-
-Notes:
-- Only valid when `is_hand_selection_active` is `true`
-- `hand_index` should come from `hand_selection.selectable_cards[*].hand_index`
-
-### Confirm the current in-combat hand selection
-
-```json
-{
-  "type": "confirm_selection"
-}
-```
-
-### Cancel the current in-combat hand selection
-
-```json
-{
-  "type": "cancel_selection"
-}
-```
-
-Notes:
-- Only valid when the prompt reports `hand_selection.cancelable = true`
-
-Example response:
-```json
-{
-  "accepted": true,
-  "error": null,
-  "state": {
-    "is_combat_active": true,
-    "current_side": "enemy"
-  }
-}
-```
+- `index`: 0-based index of the visible overlay button from the `buttons` array in the GET response
+- Use this for terminal overlays such as `game_over`, or any other structured overlay that exposes buttons
+- Enabled buttons are also listed in `available_actions` for easier client-side enumeration
