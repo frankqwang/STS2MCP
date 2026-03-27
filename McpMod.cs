@@ -40,9 +40,16 @@ public static partial class McpMod
             var tree = (SceneTree)Engine.GetMainLoop();
             tree.Connect(SceneTree.SignalName.ProcessFrame, Callable.From(ProcessMainThreadQueue));
 
+            int port = 15526;
+            string? mcpPortArg = CommandLineHelper.GetValue("mcp-port");
+            if (!string.IsNullOrWhiteSpace(mcpPortArg) && int.TryParse(mcpPortArg, out int parsedPort))
+            {
+                port = Math.Clamp(parsedPort, 1024, 65535);
+            }
+
             _listener = new HttpListener();
-            _listener.Prefixes.Add("http://localhost:15526/");
-            _listener.Prefixes.Add("http://127.0.0.1:15526/");
+            _listener.Prefixes.Add($"http://localhost:{port}/");
+            _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
             _listener.Start();
 
             _serverThread = new Thread(ServerLoop)
@@ -52,7 +59,7 @@ public static partial class McpMod
             };
             _serverThread.Start();
 
-            GD.Print($"[STS2 MCP] v{Version} server started on http://localhost:15526/");
+            GD.Print($"[STS2 MCP] v{Version} server started on http://localhost:{port}/");
         }
         catch (Exception ex)
         {
