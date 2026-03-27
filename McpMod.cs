@@ -19,7 +19,7 @@ namespace STS2_MCP;
 [ModInitializer("Initialize")]
 public static partial class McpMod
 {
-    public const string Version = "0.1.0";
+    public const string Version = "0.3.1";
 
     private static HttpListener? _listener;
     private static Thread? _serverThread;

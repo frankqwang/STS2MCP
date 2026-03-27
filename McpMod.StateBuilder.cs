@@ -215,6 +215,13 @@ public static partial class McpMod
             ["ascension"] = runState.AscensionLevel
         };
 
+        // Always include full player data (relics, potions, deck, etc.) on every screen
+        var _player = LocalContext.GetMe(runState);
+        if (_player != null)
+        {
+            result["player"] = BuildPlayerState(_player);
+        }
+
         return result;
     }
 
@@ -232,13 +239,6 @@ public static partial class McpMod
         battle["round"] = combatState.RoundNumber;
         battle["turn"] = combatState.CurrentSide.ToString().ToLower();
         battle["is_play_phase"] = CombatManager.Instance.IsPlayPhase;
-
-        // Player state
-        var player = LocalContext.GetMe(runState);
-        if (player != null)
-        {
-            battle["player"] = BuildPlayerState(player);
-        }
 
         // Enemies
         var enemies = new List<Dictionary<string, object?>>();
@@ -292,8 +292,10 @@ public static partial class McpMod
             state["discard_pile_count"] = combatState.DiscardPile.Cards.Count;
             state["exhaust_pile_count"] = combatState.ExhaustPile.Cards.Count;
 
-            // Pile contents
-            state["draw_pile"] = BuildPileCardList(combatState.DrawPile.Cards, PileType.Draw);
+            // Pile contents (draw pile is shuffled to avoid leaking actual draw order)
+            var drawPileList = BuildPileCardList(combatState.DrawPile.Cards, PileType.Draw);
+            ShuffleList(drawPileList);
+            state["draw_pile"] = drawPileList;
             state["discard_pile"] = BuildPileCardList(combatState.DiscardPile.Cards, PileType.Discard);
             state["exhaust_pile"] = BuildPileCardList(combatState.ExhaustPile.Cards, PileType.Exhaust);
 
@@ -409,6 +411,15 @@ public static partial class McpMod
             ["is_upgraded"] = card.IsUpgraded,
             ["keywords"] = BuildHoverTips(card.HoverTips)
         };
+    }
+
+    private static void ShuffleList<T>(List<T> list)
+    {
+        for (int i = list.Count - 1; i > 0; i--)
+        {
+            int j = Random.Shared.Next(i + 1);
+            (list[i], list[j]) = (list[j], list[i]);
+        }
     }
 
     private static List<Dictionary<string, object?>> BuildPileCardList(IEnumerable<CardModel> cards, PileType pile)
@@ -566,7 +577,6 @@ public static partial class McpMod
         var player = LocalContext.GetMe(runState);
         if (player != null)
             state["player"] = BuildNonCombatPlayerState(player);
-
         var eventModel = eventRoom.CanonicalEvent;
         bool isAncient = eventModel is AncientEventModel;
         state["event_id"] = eventModel.Id.Entry;
@@ -1091,7 +1101,6 @@ public static partial class McpMod
         var player = LocalContext.GetMe(runState);
         if (player != null)
             state["player"] = BuildNonCombatPlayerState(player);
-
         var options = new List<Dictionary<string, object?>>();
         int index = 0;
         foreach (var opt in restSiteRoom.Options)
@@ -1121,7 +1130,6 @@ public static partial class McpMod
         var player = LocalContext.GetMe(runState);
         if (player != null)
             state["player"] = BuildNonCombatPlayerState(player);
-
         var inventory = merchantRoom.Inventory;
         var items = new List<Dictionary<string, object?>>();
         int index = 0;
@@ -1224,7 +1232,6 @@ public static partial class McpMod
         var player = LocalContext.GetMe(runState);
         if (player != null)
             state["player"] = BuildNonCombatPlayerState(player);
-
         var map = runState.Map;
         var visitedCoords = runState.VisitedMapCoords;
 
@@ -1338,7 +1345,6 @@ public static partial class McpMod
         var player = LocalContext.GetMe(runState);
         if (player != null)
             state["player"] = BuildNonCombatPlayerState(player);
-
         // Reward items
         var rewardButtons = FindAll<NRewardButton>(rewardsScreen);
         var items = new List<Dictionary<string, object?>>();
@@ -1445,7 +1451,6 @@ public static partial class McpMod
         var player = LocalContext.GetMe(runState);
         if (player != null)
             state["player"] = BuildNonCombatPlayerState(player);
-
         // Prompt text from UI label
         var bottomLabel = screen.GetNodeOrNull("%BottomLabel");
         if (bottomLabel != null)
@@ -1536,7 +1541,6 @@ public static partial class McpMod
         var player = LocalContext.GetMe(runState);
         if (player != null)
             state["player"] = BuildNonCombatPlayerState(player);
-
         state["prompt"] = "Choose a card.";
 
         var cardHolders = FindAllSortedByPosition<NGridCardHolder>(screen);
@@ -1698,7 +1702,6 @@ public static partial class McpMod
         var player = LocalContext.GetMe(runState);
         if (player != null)
             state["player"] = BuildNonCombatPlayerState(player);
-
         state["prompt"] = "Choose a relic.";
 
         var relicHolders = FindAll<NRelicBasicHolder>(screen);
@@ -1734,7 +1737,6 @@ public static partial class McpMod
         var player = LocalContext.GetMe(runState);
         if (player != null)
             state["player"] = BuildNonCombatPlayerState(player);
-
         var treasureUI = FindFirst<NTreasureRoom>(
             ((Godot.SceneTree)Godot.Engine.GetMainLoop()).Root);
 
