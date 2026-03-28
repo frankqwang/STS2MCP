@@ -219,7 +219,25 @@ public static partial class McpMod
         var _player = LocalContext.GetMe(runState);
         if (_player != null)
         {
-            result["player"] = BuildPlayerState(_player);
+            try
+            {
+                result["player"] = BuildPlayerState(_player);
+            }
+            catch (NullReferenceException)
+            {
+                // Player state may be partially initialized during screen transitions
+                // (e.g. combat_rewards → map). Return minimal state to avoid crashing.
+                result["player"] = new Dictionary<string, object?>
+                {
+                    ["character"] = SafeGetText(() => _player.Character.Title),
+                    ["hp"] = 0,
+                    ["max_hp"] = 1,
+                    ["gold"] = 0,
+                    ["status"] = new List<Dictionary<string, object?>>(),
+                    ["relics"] = new List<Dictionary<string, object?>>(),
+                    ["potions"] = new List<Dictionary<string, object?>>(),
+                };
+            }
         }
 
         return result;
@@ -262,9 +280,10 @@ public static partial class McpMod
         var combatState = player.PlayerCombatState;
 
         state["character"] = SafeGetText(() => player.Character.Title);
-        state["hp"] = creature.CurrentHp;
-        state["max_hp"] = creature.MaxHp;
-        state["block"] = creature.Block;
+        // creature can be null during map transitions (post-combat screen change)
+        state["hp"] = creature?.CurrentHp ?? 0;
+        state["max_hp"] = creature?.MaxHp ?? 1;
+        state["block"] = creature?.Block ?? 0;
 
         if (combatState != null)
         {
@@ -334,7 +353,7 @@ public static partial class McpMod
         state["gold"] = player.Gold;
 
         // Powers (status effects)
-        state["status"] = BuildPowersState(creature);
+        state["status"] = creature != null ? BuildPowersState(creature) : new List<Dictionary<string, object?>>();
 
         // Relics
         var relics = new List<Dictionary<string, object?>>();
