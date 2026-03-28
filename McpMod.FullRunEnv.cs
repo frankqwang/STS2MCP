@@ -229,10 +229,50 @@ public static partial class McpMod
     {
         var state = BuildGameState();
         var outcome = ExtractFullRunOutcome(state);
-        state["legal_actions"] = BuildFullRunLegalActions(state);
+
+        // In simulator mode, use the simulator's authoritative LegalActions.
+        // The HTTP state builder computes legal_actions independently from game
+        // objects and can disagree with what the simulator actually accepts
+        // (e.g., Neow event post-selection shows stale unchosen options).
+        if (IsFullRunSimulatorActive())
+            state["legal_actions"] = BuildSimulatorLegalActions();
+        else
+            state["legal_actions"] = BuildFullRunLegalActions(state);
+
         state["run_outcome"] = outcome;
         state["terminal"] = IsFullRunTerminalState(state, outcome);
         return state;
+    }
+
+    /// <summary>
+    /// Converts the simulator snapshot's LegalActions into the HTTP dict format.
+    /// Must be called on the Godot main thread (already inside RunOnMainThread).
+    /// </summary>
+    private static List<Dictionary<string, object?>> BuildSimulatorLegalActions()
+    {
+        try
+        {
+            var snapshot = FullRunTrainingEnvService.Instance.GetState();
+            var result = new List<Dictionary<string, object?>>(snapshot.LegalActions.Count);
+            foreach (var a in snapshot.LegalActions)
+            {
+                var d = new Dictionary<string, object?> { ["action"] = a.Action };
+                if (a.Index.HasValue)     d["index"]     = a.Index.Value;
+                if (a.Col.HasValue)       d["col"]       = a.Col.Value;
+                if (a.Row.HasValue)       d["row"]       = a.Row.Value;
+                if (a.CardIndex.HasValue) d["card_index"] = a.CardIndex.Value;
+                if (a.Slot.HasValue)      d["slot"]      = a.Slot.Value;
+                if (a.TargetId.HasValue)  d["target_id"] = a.TargetId.Value;
+                if (!string.IsNullOrEmpty(a.Target)) d["target"] = a.Target;
+                if (!string.IsNullOrEmpty(a.Label))  d["label"]  = a.Label;
+                result.Add(d);
+            }
+            return result;
+        }
+        catch
+        {
+            return new List<Dictionary<string, object?>>();
+        }
     }
 
     private static Dictionary<string, object?> ShapeFullRunEnvStepResult(
