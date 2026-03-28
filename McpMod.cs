@@ -100,6 +100,29 @@ public static partial class McpMod
         return tcs.Task;
     }
 
+    // Enqueues an async func on the main thread, then waits for it to complete
+    // across multiple Godot frames. Godot's SynchronizationContext ensures async
+    // continuations (Task.Yield, ToSignal) also run on the main thread.
+    internal static Task<T> RunOnMainThreadAsync<T>(Func<Task<T>> asyncFunc)
+    {
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _mainThreadQueue.Enqueue(() =>
+        {
+            try
+            {
+                var inner = asyncFunc();
+                inner.ContinueWith(t =>
+                {
+                    if (t.IsFaulted) tcs.SetException(t.Exception!.InnerExceptions);
+                    else if (t.IsCanceled) tcs.SetCanceled();
+                    else tcs.SetResult(t.Result);
+                }, TaskContinuationOptions.ExecuteSynchronously);
+            }
+            catch (Exception ex) { tcs.SetException(ex); }
+        });
+        return tcs.Task;
+    }
+
     private static void ServerLoop()
     {
         while (_listener?.IsListening == true)

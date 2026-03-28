@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Text.Json;
 using System.Threading;
+using MegaCrit.Sts2.Core.Simulation;
 
 namespace STS2_MCP;
 
@@ -30,16 +31,29 @@ public static partial class McpMod
         try
         {
             var parsed = ParseFullRunEnvRequestObject(request, allowEmptyBody: true);
+
+            if (IsFullRunSimulatorActive())
+            {
+                var resetReq = ParseSimResetRequest(parsed);
+                var snapshotTask = RunOnMainThreadAsync(() => FullRunTrainingEnvService.Instance.ResetAsync(resetReq));
+                snapshotTask.GetAwaiter().GetResult();
+
+                var stateTask = RunOnMainThread(BuildFullRunEnvState);
+                var state = stateTask.GetAwaiter().GetResult();
+                SendJson(response, state);
+                return;
+            }
+
             var startResultTask = RunOnMainThread(() => ExecuteStartRun(parsed));
             var startResult = startResultTask.GetAwaiter().GetResult();
             if (IsErrorResult(startResult, out var resetError))
                 throw new InvalidOperationException(resetError ?? "Failed to start run.");
 
-            var state = WaitForFullRunEnvState(
+            var legacyState = WaitForFullRunEnvState(
                 predicate: static state => GetStateType(state) != "menu" && IsSettledFullRunState(state) && IsActionableOrTerminalFullRunState(state),
                 timeoutMs: GetOptionalInt(parsed, "timeout_ms", 20000),
                 pollDelayMs: GetOptionalInt(parsed, "poll_delay_ms", 50));
-            SendJson(response, state);
+            SendJson(response, legacyState);
         }
         catch (JsonException ex)
         {
@@ -63,6 +77,18 @@ public static partial class McpMod
             if (!parsed.TryGetValue("action", out var actionElem) || actionElem.ValueKind != JsonValueKind.String)
                 throw new InvalidOperationException("Missing 'action' field.");
 
+            if (IsFullRunSimulatorActive())
+            {
+                var actionReq = ParseSimActionRequest(parsed);
+                var simResultTask = RunOnMainThreadAsync(() => FullRunTrainingEnvService.Instance.StepAsync(actionReq));
+                var simResult = simResultTask.GetAwaiter().GetResult();
+
+                var stateTask = RunOnMainThread(BuildFullRunEnvState);
+                var state = stateTask.GetAwaiter().GetResult();
+                SendJson(response, ShapeFullRunEnvStepResult(state, simResult.Accepted, simResult.Error, null));
+                return;
+            }
+
             var beforeStateTask = RunOnMainThread(BuildFullRunEnvState);
             var beforeState = beforeStateTask.GetAwaiter().GetResult();
 
@@ -71,29 +97,29 @@ public static partial class McpMod
             var actionResult = resultTask.GetAwaiter().GetResult();
 
             var accepted = !IsErrorResult(actionResult, out var actionError);
-            Dictionary<string, object?> state;
+            Dictionary<string, object?> state2;
             string? stepInfoCode = null;
             if (accepted)
             {
                 try
                 {
-                    state = WaitForChangedFullRunEnvState(
+                    state2 = WaitForChangedFullRunEnvState(
                         beforeState,
                         timeoutMs: GetOptionalInt(parsed, "timeout_ms", 2000),
                         pollDelayMs: GetOptionalInt(parsed, "poll_delay_ms", 25));
                 }
                 catch (TimeoutException)
                 {
-                    state = RunOnMainThread(BuildFullRunEnvState).GetAwaiter().GetResult();
+                    state2 = RunOnMainThread(BuildFullRunEnvState).GetAwaiter().GetResult();
                     stepInfoCode = "state_change_timeout";
                 }
             }
             else
             {
-                state = RunOnMainThread(BuildFullRunEnvState).GetAwaiter().GetResult();
+                state2 = RunOnMainThread(BuildFullRunEnvState).GetAwaiter().GetResult();
             }
 
-            SendJson(response, ShapeFullRunEnvStepResult(state, accepted, actionError, stepInfoCode));
+            SendJson(response, ShapeFullRunEnvStepResult(state2, accepted, actionError, stepInfoCode));
         }
         catch (JsonException ex)
         {
@@ -728,5 +754,49 @@ public static partial class McpMod
             _ when bool.TryParse(raw.ToString(), out var parsed) => parsed,
             _ => defaultValue
         };
+    }
+
+    private static bool IsFullRunSimulatorActive()
+    {
+        try { return FullRunSimulationMode.IsServerActive || FullRunSimulationMode.IsSmokeActive; }
+        catch { return false; }
+    }
+
+    private static FullRunSimulationResetRequest ParseSimResetRequest(Dictionary<string, JsonElement> parsed)
+    {
+        var req = new FullRunSimulationResetRequest();
+        if (parsed.TryGetValue("character_id", out var charElem) && charElem.ValueKind == JsonValueKind.String)
+            req.CharacterId = charElem.GetString();
+        if (parsed.TryGetValue("seed", out var seedElem) && seedElem.ValueKind == JsonValueKind.String)
+            req.Seed = seedElem.GetString();
+        if (parsed.TryGetValue("ascension_level", out var ascElem) && ascElem.ValueKind == JsonValueKind.Number)
+            req.AscensionLevel = ascElem.GetInt32();
+        return req;
+    }
+
+    private static FullRunSimulationActionRequest ParseSimActionRequest(Dictionary<string, JsonElement> parsed)
+    {
+        var req = new FullRunSimulationActionRequest();
+        if (parsed.TryGetValue("action", out var actionElem) && actionElem.ValueKind == JsonValueKind.String)
+            req.Action = actionElem.GetString() ?? string.Empty;
+        if (parsed.TryGetValue("index", out var indexElem) && indexElem.ValueKind == JsonValueKind.Number)
+            req.Index = indexElem.GetInt32();
+        if (parsed.TryGetValue("card_index", out var cardIndexElem) && cardIndexElem.ValueKind == JsonValueKind.Number)
+            req.CardIndex = cardIndexElem.GetInt32();
+        if (parsed.TryGetValue("hand_index", out var handIndexElem) && handIndexElem.ValueKind == JsonValueKind.Number)
+            req.HandIndex = handIndexElem.GetInt32();
+        if (parsed.TryGetValue("slot", out var slotElem) && slotElem.ValueKind == JsonValueKind.Number)
+            req.Slot = slotElem.GetInt32();
+        if (parsed.TryGetValue("col", out var colElem) && colElem.ValueKind == JsonValueKind.Number)
+            req.Col = colElem.GetInt32();
+        if (parsed.TryGetValue("row", out var rowElem) && rowElem.ValueKind == JsonValueKind.Number)
+            req.Row = rowElem.GetInt32();
+        if (parsed.TryGetValue("target", out var targetElem) && targetElem.ValueKind == JsonValueKind.String)
+            req.Target = targetElem.GetString();
+        if (parsed.TryGetValue("target_id", out var targetIdElem) && targetIdElem.ValueKind == JsonValueKind.Number)
+            req.TargetId = targetIdElem.GetUInt32();
+        if (parsed.TryGetValue("value", out var valueElem) && valueElem.ValueKind == JsonValueKind.String)
+            req.Value = valueElem.GetString();
+        return req;
     }
 }
