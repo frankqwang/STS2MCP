@@ -151,6 +151,70 @@ public static partial class McpMod
         }
     }
 
+    private static void HandlePostFullRunEnvBatchStep(HttpListenerRequest request, HttpListenerResponse response)
+    {
+        try
+        {
+            // Parse JSON body: { "actions": [ {action, index, ...}, ... ] }
+            string body;
+            using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
+                body = reader.ReadToEnd();
+
+            if (string.IsNullOrWhiteSpace(body))
+                throw new InvalidOperationException("Empty request body.");
+
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("actions", out var actionsElem) || actionsElem.ValueKind != JsonValueKind.Array)
+                throw new InvalidOperationException("Missing 'actions' array field.");
+
+            // Parse each action in the array
+            var actionList = new List<FullRunSimulationActionRequest>();
+            foreach (var actionJson in actionsElem.EnumerateArray())
+            {
+                if (actionJson.ValueKind != JsonValueKind.Object)
+                    continue;
+                // Convert JsonElement to Dictionary<string, JsonElement> for ParseSimActionRequest
+                var dict = new Dictionary<string, JsonElement>();
+                foreach (var prop in actionJson.EnumerateObject())
+                    dict[prop.Name] = prop.Value;
+                actionList.Add(ParseSimActionRequest(dict));
+            }
+
+            if (actionList.Count == 0)
+                throw new InvalidOperationException("Actions array is empty.");
+
+            // Execute all actions in a single main-thread call
+            var outerTask = RunOnMainThreadAsync(() =>
+            {
+                var batchTask = FullRunTrainingEnvService.Instance.BatchStepAsync(actionList);
+                return batchTask.ContinueWith(t =>
+                {
+                    var batchResult = t.Result;
+                    var state = BuildFullRunEnvState();
+                    var response = new Dictionary<string, object?>
+                    {
+                        ["accepted"] = batchResult.Accepted,
+                        ["error"] = batchResult.Error,
+                        ["steps_executed"] = batchResult.StepsExecuted,
+                    };
+                    // Merge full state into response
+                    foreach (var kv in state)
+                        response[kv.Key] = kv.Value;
+                    return response;
+                }, TaskContinuationOptions.ExecuteSynchronously);
+            });
+
+            var result = outerTask.GetAwaiter().GetResult();
+            SendJson(response, result);
+        }
+        catch (Exception ex)
+        {
+            SendError(response, 500, $"Batch step failed: {ex.Message}");
+        }
+    }
+
     private static Dictionary<string, JsonElement> ParseFullRunEnvRequestObject(HttpListenerRequest request, bool allowEmptyBody)
     {
         string body;

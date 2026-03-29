@@ -256,6 +256,13 @@ public static partial class McpMod
                 else
                     SendError(response, 405, "Method not allowed");
             }
+            else if (path == "/api/v2/full_run_env/batch_step")
+            {
+                if (request.HttpMethod == "POST")
+                    HandlePostFullRunEnvBatchStep(request, response);
+                else
+                    SendError(response, 405, "Method not allowed");
+            }
             else
             {
                 SendError(response, 404, "Not found");
