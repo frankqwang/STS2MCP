@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using MegaCrit.Sts2.Core.Simulation;
 
 namespace STS2_MCP;
@@ -35,11 +36,14 @@ public static partial class McpMod
             if (IsFullRunSimulatorActive())
             {
                 var resetReq = ParseSimResetRequest(parsed);
-                var snapshotTask = RunOnMainThreadAsync(() => FullRunTrainingEnvService.Instance.ResetAsync(resetReq));
-                snapshotTask.GetAwaiter().GetResult();
-
-                var stateTask = RunOnMainThread(BuildFullRunEnvState);
-                var state = stateTask.GetAwaiter().GetResult();
+                // Chain ResetAsync + BuildFullRunEnvState in one main-thread call
+                var outerTask = RunOnMainThreadAsync(() =>
+                {
+                    var resetTask = FullRunTrainingEnvService.Instance.ResetAsync(resetReq);
+                    return resetTask.ContinueWith(_ => BuildFullRunEnvState(),
+                        TaskContinuationOptions.ExecuteSynchronously);
+                });
+                var state = outerTask.GetAwaiter().GetResult();
                 SendJson(response, state);
                 return;
             }
@@ -80,12 +84,24 @@ public static partial class McpMod
             if (IsFullRunSimulatorActive())
             {
                 var actionReq = ParseSimActionRequest(parsed);
-                var simResultTask = RunOnMainThreadAsync(() => FullRunTrainingEnvService.Instance.StepAsync(actionReq));
-                var simResult = simResultTask.GetAwaiter().GetResult();
-
-                var stateTask = RunOnMainThread(BuildFullRunEnvState);
-                var state = stateTask.GetAwaiter().GetResult();
-                SendJson(response, ShapeFullRunEnvStepResult(state, simResult.Accepted, simResult.Error, null));
+                // Chain StepAsync + BuildFullRunEnvState in a single main-thread call.
+                // Using ContinueWith(ExecuteSynchronously) avoids a separate
+                // RunOnMainThread enqueue for BuildFullRunEnvState, saving ~1 frame.
+                // NOTE: Do NOT use an async lambda wrapper — that adds a SyncContext
+                // hop and costs an extra frame (see CLAUDE.md §2.3).
+                var outerTask = RunOnMainThreadAsync(() =>
+                {
+                    var stepTask = FullRunTrainingEnvService.Instance.StepAsync(actionReq);
+                    return stepTask.ContinueWith(t =>
+                    {
+                        var simResult = t.Result;
+                        var state = BuildFullRunEnvState();
+                        return ShapeFullRunEnvStepResult(state, simResult.Accepted, simResult.Error, null);
+                    }, TaskContinuationOptions.ExecuteSynchronously);
+                });
+                // Unwrap Task<Task<T>> → Task<T>
+                var result = outerTask.GetAwaiter().GetResult();
+                SendJson(response, result);
                 return;
             }
 
@@ -230,12 +246,17 @@ public static partial class McpMod
         var state = BuildGameState();
         var outcome = ExtractFullRunOutcome(state);
 
-        // In simulator mode, use the simulator's authoritative LegalActions.
-        // The HTTP state builder computes legal_actions independently from game
-        // objects and can disagree with what the simulator actually accepts
-        // (e.g., Neow event post-selection shows stale unchosen options).
+        // In simulator mode, use the simulator's authoritative state_type and
+        // LegalActions.  The HTTP state builder can disagree with the simulator
+        // (e.g. after combat ends, v1 reports "monster" but the simulator correctly
+        // reports "combat_rewards" once _pendingRewardSelection is set).
         if (IsFullRunSimulatorActive())
+        {
+            var simStateType = GetSimulatorStateType();
+            if (!string.IsNullOrEmpty(simStateType))
+                state["state_type"] = simStateType;
             state["legal_actions"] = BuildSimulatorLegalActions();
+        }
         else
             state["legal_actions"] = BuildFullRunLegalActions(state);
 
@@ -273,6 +294,12 @@ public static partial class McpMod
         {
             return new List<Dictionary<string, object?>>();
         }
+    }
+
+    private static string GetSimulatorStateType()
+    {
+        try { return FullRunTrainingEnvService.Instance.GetState().StateType ?? string.Empty; }
+        catch { return string.Empty; }
     }
 
     private static Dictionary<string, object?> ShapeFullRunEnvStepResult(

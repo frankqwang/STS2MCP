@@ -70,7 +70,7 @@ public static partial class McpMod
     private static void ProcessMainThreadQueue()
     {
         int processed = 0;
-        while (_mainThreadQueue.TryDequeue(out var action) && processed < 10)
+        while (_mainThreadQueue.TryDequeue(out var action) && processed < 50)
         {
             try { action(); }
             catch (Exception ex) { GD.PrintErr($"[STS2 MCP] Main thread action error: {ex}"); }
