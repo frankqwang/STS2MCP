@@ -310,22 +310,31 @@ public static partial class McpMod
         var state = BuildGameState();
         var outcome = ExtractFullRunOutcome(state);
 
-        // In simulator mode, use the simulator's authoritative state_type and
-        // LegalActions.  The HTTP state builder can disagree with the simulator
-        // (e.g. after combat ends, v1 reports "monster" but the simulator correctly
-        // reports "combat_rewards" once _pendingRewardSelection is set).
+        // In simulator mode, use the simulator's authoritative state_type,
+        // LegalActions, and RunOutcome.  The HTTP state builder can disagree
+        // with the simulator (e.g. after combat ends, v1 reports "monster"
+        // but the simulator correctly reports "combat_rewards").
         if (IsFullRunSimulatorActive())
         {
-            var simStateType = GetSimulatorStateType();
-            if (!string.IsNullOrEmpty(simStateType))
-                state["state_type"] = simStateType;
-            state["legal_actions"] = BuildSimulatorLegalActions();
+            var simSnapshot = GetSimulatorSnapshot();
+            if (simSnapshot != null)
+            {
+                if (!string.IsNullOrEmpty(simSnapshot.StateType))
+                    state["state_type"] = simSnapshot.StateType;
+                state["legal_actions"] = BuildSimulatorLegalActionsFromSnapshot(simSnapshot);
+                if (simSnapshot.RunOutcome != null)
+                    outcome = simSnapshot.RunOutcome;
+                if (simSnapshot.IsTerminal)
+                    state["terminal"] = true;
+            }
         }
         else
             state["legal_actions"] = BuildFullRunLegalActions(state);
 
         state["run_outcome"] = outcome;
-        state["terminal"] = IsFullRunTerminalState(state, outcome);
+        state["terminal"] = state.TryGetValue("terminal", out var term) && term is true
+            ? true
+            : IsFullRunTerminalState(state, outcome);
         return state;
     }
 
@@ -360,10 +369,33 @@ public static partial class McpMod
         }
     }
 
-    private static string GetSimulatorStateType()
+    private static FullRunSimulationStateSnapshot? GetSimulatorSnapshot()
     {
-        try { return FullRunTrainingEnvService.Instance.GetState().StateType ?? string.Empty; }
-        catch { return string.Empty; }
+        try { return FullRunTrainingEnvService.Instance.GetState(); }
+        catch { return null; }
+    }
+
+    private static List<Dictionary<string, object?>> BuildSimulatorLegalActionsFromSnapshot(FullRunSimulationStateSnapshot snapshot)
+    {
+        var result = new List<Dictionary<string, object?>>(snapshot.LegalActions.Count);
+        foreach (var a in snapshot.LegalActions)
+        {
+            var dict = new Dictionary<string, object?>
+            {
+                ["action"] = a.Action,
+            };
+            if (a.Index.HasValue) dict["index"] = a.Index.Value;
+            if (a.CardIndex.HasValue) dict["card_index"] = a.CardIndex.Value;
+            if (a.TargetId.HasValue) dict["target_id"] = a.TargetId.Value;
+            if (a.Slot.HasValue) dict["slot"] = a.Slot.Value;
+            if (a.Col.HasValue) dict["col"] = a.Col.Value;
+            if (a.Row.HasValue) dict["row"] = a.Row.Value;
+            if (a.Label != null) dict["label"] = a.Label;
+            if (a.Target != null) dict["target"] = a.Target;
+            if (a.Note != null) dict["note"] = a.Note;
+            result.Add(dict);
+        }
+        return result;
     }
 
     private static Dictionary<string, object?> ShapeFullRunEnvStepResult(
